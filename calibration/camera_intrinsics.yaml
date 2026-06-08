@@ -1,0 +1,16 @@
+# Calibration intrinsèque de la caméra Daheng.
+# Source : calibration G. Steigerwald (RMS reproj = 1.3044 px).
+# fx, fy = focales (px) ; cx, cy = centre optique (px).
+# distortion = [k1, k2, p1, p2, k3] (modèle OpenCV).
+
+# Résolution réelle de capture de la Daheng (confirmée à la capture).
+image_width: 2448
+image_height: 2048
+
+camera_matrix:
+  fx: 1817.06660
+  fy: 1819.31229
+  cx: 1186.32358
+  cy: 1054.88792
+
+distortion: [-0.08040586, 0.14703673, 0.00077928, -0.00052192, -0.08949106]

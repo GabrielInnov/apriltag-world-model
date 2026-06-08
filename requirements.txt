@@ -1,0 +1,11 @@
+numpy
+scipy
+opencv-python
+pupil-apriltags
+open3d
+pyyaml
+
+# Le SDK caméra Daheng (gxipy) n'est PAS sur PyPI.
+# Installe le "Galaxy SDK" Daheng, puis le wheel gxipy fourni avec le SDK :
+#   pip install <chemin_SDK>/Galaxy_camera/api/python/gxipy-X.X.X-py3-none-any.whl
+# Sans gxipy, le projet bascule automatiquement sur webcam / fichier vidéo.

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# SDK Daheng "vendored" — non versionné (voir README pour l'installation)
+gxipy/
+
+# Sorties générées à l'exécution
+world_model.json
+
+# Artefacts provenant d'autres outils
+DepthCamera_*.json
+DepthCapture_*.png

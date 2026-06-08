@@ -1,0 +1,29 @@
+# Configuration du world model AprilTag
+
+tag:
+  family: tag36h11      # famille des marqueurs
+  size_m: 0.023          # taille physique du tag en mètres (bord noir extérieur)
+  reference_id: 0       # id du tag qui définit l'origine du monde
+
+camera:
+  source: auto          # auto | daheng | webcam | <chemin vers un fichier vidéo>
+  webcam_index: 0       # index de la webcam si fallback
+  exposure_us: 5000    # >>> EXPO FIXE en µs <<< règle ici. Plus court = + sombre, - de flou. (auto = auto-expo)
+  binning: 2            # 1 = pleine résolution (max précision). 2 = 2x2 (4x moins de pixels, BIEN + rapide ; intrinsèques auto-ajustées)
+  intrinsics: calibration/camera_intrinsics.yaml
+
+detection:
+  nthreads: 4
+  quad_decimate: 2.0    # >1.0 = plus rapide mais moins précis (2.0 = bon compromis avec binning 2)
+  decode_sharpening: 0.25
+
+mapping:
+  enabled: true         # true = on calibre (ajoute les tags). false = carte figée, localisation seule. Touche [c] pour basculer
+  min_observations: 1   # nb d'observations min d'une arête avant de la prendre en compte
+
+visualization:
+  enabled: true         # (réservé) visu 3D disponible
+  autostart: false      # false = la vue 3D s'ouvre via le bouton "Afficher vue 3D" ; true = au démarrage
+
+export:
+  path: world_model.json
