@@ -107,23 +107,25 @@ class Menu:
         if event == cv2.EVENT_LBUTTONDOWN:
             self._click = (x, y)
 
-    def render(self, video, mapping_on, viz_open):
+    def render(self, video, mapping_on, viz_open, trace_on):
         """Renvoie l'image composite [vidéo | panneau de boutons]. Le panneau est
         mis en cache et n'est redessiné que lorsque son état change."""
         h, w = video.shape[:2]
-        key = (h, w, mapping_on, viz_open)
+        key = (h, w, mapping_on, viz_open, trace_on)
         if key != self._key:
-            self._panel, self._rects = self._build_panel(h, w, mapping_on, viz_open)
+            self._panel, self._rects = self._build_panel(h, w, mapping_on, viz_open, trace_on)
             self._key = key
         return np.hstack([video, self._panel])
 
-    def _build_panel(self, h, w, mapping_on, viz_open):
+    def _build_panel(self, h, w, mapping_on, viz_open, trace_on):
         panel = np.full((h, self.PANEL_W, 3), 38, np.uint8)
         items = [
             ("save", "Enregistrer", (60, 60, 60)),
             ("calib", f"Calib: {'ON' if mapping_on else 'OFF'}",
              (0, 110, 0) if mapping_on else (70, 70, 70)),
             ("viz", "Masquer 3D" if viz_open else "Afficher vue 3D", (95, 70, 0)),
+            ("trace", f"Trace: {'ON' if trace_on else 'OFF'}",
+             (90, 60, 60) if trace_on else (60, 60, 60)),
             ("reset", "Reset carte", (60, 60, 60)),
             ("exp_down", "Expo -", (60, 60, 60)),
             ("exp_up", "Expo +", (60, 60, 60)),
@@ -165,17 +167,18 @@ def main():
     reference_id = cfg["tag"]["reference_id"]
     min_obs = cfg["mapping"]["min_observations"]
     mapping_on = cfg["mapping"].get("enabled", True)
-    world = WorldModel(reference_id, min_obs, mapping=mapping_on)
     tag_size = cfg["tag"]["size_m"]
+    world = WorldModel(reference_id, min_obs, mapping=mapping_on, tag_size=tag_size)
+    trace_on = cfg["visualization"].get("trace", True)  # trace caméra en 3D
     viz = None  # la vue 3D s'ouvre à la demande (bouton "Afficher vue 3D")
     if cfg["visualization"].get("autostart", False):
-        viz = Visualizer(tag_size, reference_id)
+        viz = Visualizer(tag_size, reference_id, show_trajectory=trace_on)
     export_path = os.path.join(HERE, cfg["export"]["path"])
 
     print("Vue caméra : panneau de boutons à droite "
           "(Enregistrer / Calib / Afficher vue 3D / Reset / Expo / Quitter).")
     print("Touches équivalentes (fenêtre caméra au focus) : "
-          "[q] quitter [s] save [r] reset [c] calib [v] vue 3D [+/-] expo")
+          "[q] quitter [s] save [r] reset [c] calib [v] vue 3D [t] trace [+/-] expo")
     window_name = "AprilTag scan"
     menu = Menu()
     cv2.namedWindow(window_name)
@@ -220,6 +223,8 @@ def main():
                 disp_map1, disp_map2 = cv2.initUndistortRectifyMap(
                     K, dist, None, K_disp, (dw, dh), cv2.CV_16SC2
                 )
+                # K (résolution de détection) -> nécessaire au PnP multi-tags.
+                world.camera_matrix = K
 
             # Détection/intégration + rendu UNIQUEMENT sur une image neuve (sinon on
             # réutilise `base` : la boucle reste fluide et réactive aux entrées).
@@ -237,8 +242,22 @@ def main():
                     status += f" | expo: {exp_us:.0f} us"
                 cv2.putText(base, status, (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                # Position de la caméra par rapport au tag de référence (origine).
+                # last_camera_pose = T_world_cam ; sa translation = X, Y, Z (m).
+                cp = world.last_camera_pose
+                if cp is not None:
+                    x, y, z = cp[:3, 3]
+                    d = float(np.linalg.norm((x, y, z)))
+                    pos_txt = (f"cam/REF{reference_id} (m): "
+                               f"X={x:+.3f} Y={y:+.3f} Z={z:+.3f}  d={d:.3f}")
+                    pos_col = (0, 255, 255)
+                else:
+                    pos_txt = f"cam/REF{reference_id}: tag de reference non localise"
+                    pos_col = (0, 165, 255)
+                cv2.putText(base, pos_txt, (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, pos_col, 2)
 
-            composite = menu.render(base, world.mapping, viz is not None)
+            composite = menu.render(base, world.mapping, viz is not None, trace_on)
             cv2.imshow(window_name, composite)
             # La vue 3D est optionnelle : si elle est fermée (X / q), on la masque
             # simplement (on NE quitte PAS l'application).
@@ -258,18 +277,25 @@ def main():
                 save(world, export_path)
                 print(f"[export] {export_path} ({len(world.poses)} tags)")
             if action == "reset" or key == ord("r"):
-                world = WorldModel(reference_id, min_obs, mapping=world.mapping)
+                world = WorldModel(reference_id, min_obs, mapping=world.mapping,
+                                   tag_size=tag_size)
+                world.camera_matrix = K
                 print("[reset] world model réinitialisé")
             if action == "calib" or key == ord("c"):
                 world.mapping = not world.mapping
                 print(f"[calibration] {'ON (ajout des tags)' if world.mapping else 'OFF (carte figee, localisation seule)'}")
             if action == "viz" or key == ord("v"):
                 if viz is None:
-                    viz = Visualizer(tag_size, reference_id)  # ouvre la fenêtre 3D
+                    viz = Visualizer(tag_size, reference_id, show_trajectory=trace_on)
                 else:
                     viz.close()
                     viz = None
                     print("[viz 3D] fermée")
+            if action == "trace" or key == ord("t"):
+                trace_on = not trace_on
+                if viz is not None:
+                    viz.set_trajectory(trace_on)
+                print(f"[trace] {'ON' if trace_on else 'OFF'}")
             # Réglage live de l'exposition (-20 % / +25 %).
             exp_delta = None
             if action == "exp_down" or key == ord("-"):

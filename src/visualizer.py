@@ -28,10 +28,12 @@ _TRAJ_COLOR = [0.85, 0.86, 0.92]  # blanc cassé : trajectoire
 
 
 class Visualizer:
-    def __init__(self, tag_size=0.1, reference_id=0):
+    def __init__(self, tag_size=0.1, reference_id=0, show_trajectory=True):
         self.enabled = _HAS_O3D
         self.tag_size = tag_size
         self.reference_id = reference_id
+        self.show_trajectory = show_trajectory   # trace de la caméra affichée ?
+        self._force_rebuild = False              # forcer un rebuild au prochain update
         if not self.enabled:
             print("[viz] open3d non installé : visualisation 3D désactivée.")
             return
@@ -41,6 +43,7 @@ class Visualizer:
         self.alive = True
         self.vis.register_key_callback(ord("Q"), self._request_close)
         self.vis.register_key_callback(256, self._request_close)  # Échap (GLFW)
+        self.vis.register_key_callback(ord("T"), self._toggle_trajectory)
 
         opt = self.vis.get_render_option()
         opt.background_color = np.array([0.07, 0.08, 0.10])
@@ -67,7 +70,7 @@ class Visualizer:
 
         print("[viz 3D] Navigation CLAVIER :")
         print("   fleches : pivoter  |  W/S ou molette : zoom  |  I/J/K/L : deplacer")
-        print("   F : vue d'ensemble (cadre tous les tags)  |  R : recentrer  |  Q : quitter")
+        print("   F : vue d'ensemble  |  R : recentrer  |  T : trace on/off  |  Q : quitter")
 
         self._dynamic = []
         self._traj = []          # positions monde successives de la caméra
@@ -129,6 +132,18 @@ class Visualizer:
     def _request_close(self, _vis):
         self.alive = False
         return False
+
+    def _toggle_trajectory(self, _vis=None):
+        """Affiche/masque la trace de la caméra (touche T)."""
+        self.set_trajectory(not self.show_trajectory)
+        return False
+
+    def set_trajectory(self, on):
+        """Active/désactive la trace (les points restent accumulés : réactiver
+        réaffiche tout le tracé). Force un rebuild pour un effet immédiat."""
+        if self.enabled and on != self.show_trajectory:
+            self.show_trajectory = on
+            self._force_rebuild = True
 
     def _color_for(self, tag_id):
         return _REF_COLOR if tag_id == self.reference_id else _TAG_COLOR
@@ -202,9 +217,12 @@ class Visualizer:
         # nouveau tag apparaît, ou périodiquement. Entre deux, on se contente de
         # rendre la scène pour garder la fenêtre fluide et réactive aux touches.
         self._frame += 1
-        rebuild = (len(poses) != self._last_n) or (self._frame % self._rebuild_every == 0)
+        rebuild = (len(poses) != self._last_n
+                   or self._frame % self._rebuild_every == 0
+                   or self._force_rebuild)
 
         if rebuild:
+            self._force_rebuild = False
             for g in self._dynamic:
                 self.vis.remove_geometry(g, reset_bounding_box=False)
             self._dynamic = []
@@ -223,7 +241,7 @@ class Visualizer:
                 self.vis.add_geometry(frustum, reset_bounding_box=False)
                 self._dynamic.append(frustum)
 
-            if len(self._traj) >= 2:
+            if self.show_trajectory and len(self._traj) >= 2:
                 traj = self._trajectory()
                 self.vis.add_geometry(traj, reset_bounding_box=False)
                 self._dynamic.append(traj)

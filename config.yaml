@@ -24,6 +24,7 @@ mapping:
 visualization:
   enabled: true         # (réservé) visu 3D disponible
   autostart: false      # false = la vue 3D s'ouvre via le bouton "Afficher vue 3D" ; true = au démarrage
+  trace: true           # afficher la trace (trajectoire) de la caméra en 3D (touche [t] / bouton pour basculer)
 
 export:
   path: world_model.json
