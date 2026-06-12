@@ -81,10 +81,24 @@ class Camera:
 class OpenCVCamera(Camera):
     """Webcam (index entier) ou fichier vidéo (chemin)."""
 
-    def __init__(self, source=0):
+    def __init__(self, source=0, width=None, height=None):
         self.cap = cv2.VideoCapture(source)
         if not self.cap.isOpened():
             raise RuntimeError(f"Impossible d'ouvrir la source vidéo : {source!r}")
+        # Force la résolution de capture (pour coller à la calibration).
+        # MJPG d'abord : beaucoup de webcams n'atteignent le 1080p qu'en MJPG.
+        if width and height:
+            try:
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            except Exception:
+                pass
+        if width:
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
+        if height:
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+        w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"[camera] Webcam {w}x{h}.")
         self.source = source
 
     def read(self):
@@ -278,4 +292,5 @@ def create_camera(cfg):
 
     idx = cfg.get("webcam_index", 0)
     print(f"[camera] Ouverture de la webcam index {idx}.")
-    return AsyncCamera(OpenCVCamera(idx))  # lecture en thread -> UI réactive
+    return AsyncCamera(OpenCVCamera(idx, cfg.get("webcam_width"),
+                                    cfg.get("webcam_height")))

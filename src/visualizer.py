@@ -145,8 +145,14 @@ class Visualizer:
             self.show_trajectory = on
             self._force_rebuild = True
 
-    def _color_for(self, tag_id):
-        return _REF_COLOR if tag_id == self.reference_id else _TAG_COLOR
+    def _color_for(self, tag_id, errors=None):
+        if tag_id == self.reference_id:
+            return _REF_COLOR
+        # Coloration par erreur de reprojection : vert (<=1 px) -> rouge (>=5 px).
+        if errors and tag_id in errors:
+            x = min(1.0, max(0.0, (errors[tag_id] - 1.0) / 4.0))
+            return [x, 1.0 - x, 0.15]          # RGB : vert = précis, rouge = douteux
+        return _TAG_COLOR
 
     def _tag_corners(self, T):
         h = self.tag_size / 2.0
@@ -199,9 +205,10 @@ class Visualizer:
         return ls
 
     # ----------------------------------------------------------------- update
-    def update(self, poses, camera_pose=None):
-        """Met à jour la scène 3D. Retourne False si la fenêtre doit se fermer
-        (bouton X, touche `q`/Échap), True sinon (ou si la visu est désactivée)."""
+    def update(self, poses, camera_pose=None, tag_errors=None, frozen=()):
+        """Met à jour la scène 3D. `tag_errors` (id->px) colore les tags du vert
+        (précis) au rouge (douteux) ; les tags `frozen` (verrouillés) ont un contour
+        blanc. Retourne False si la fenêtre doit se fermer."""
         if not self.enabled:
             return True
 
@@ -227,11 +234,14 @@ class Visualizer:
                 self.vis.remove_geometry(g, reset_bounding_box=False)
             self._dynamic = []
 
-            # Tags : carré plein + contour (épuré, pas de trièdre par tag).
+            # Tags : carré plein + contour (couleur = qualité ; contour blanc = figé).
             for tid, T in poses.items():
-                color = self._color_for(tid)
-                for g in (self._tag_square(T, color),
-                          self._tag_outline(T, color)):
+                color = self._color_for(tid, tag_errors)
+                square = self._tag_square(T, color)
+                outline = self._tag_outline(T, color)
+                if tid in frozen:
+                    outline.paint_uniform_color([1.0, 1.0, 1.0])   # verrouillé
+                for g in (square, outline):
                     self.vis.add_geometry(g, reset_bounding_box=False)
                     self._dynamic.append(g)
 

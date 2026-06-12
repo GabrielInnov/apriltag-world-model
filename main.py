@@ -126,6 +126,7 @@ class Menu:
             ("viz", "Masquer 3D" if viz_open else "Afficher vue 3D", (95, 70, 0)),
             ("trace", f"Trace: {'ON' if trace_on else 'OFF'}",
              (90, 60, 60) if trace_on else (60, 60, 60)),
+            ("refine", "Affiner (BA)", (0, 90, 90)),
             ("reset", "Reset carte", (60, 60, 60)),
             ("exp_down", "Expo -", (60, 60, 60)),
             ("exp_up", "Expo +", (60, 60, 60)),
@@ -165,10 +166,23 @@ def main():
         cfg["tag"]["family"], cfg["tag"]["size_m"], cam_params, cfg.get("detection")
     )
     reference_id = cfg["tag"]["reference_id"]
-    min_obs = cfg["mapping"]["min_observations"]
-    mapping_on = cfg["mapping"].get("enabled", True)
+    mp = cfg["mapping"]
+    min_obs = mp.get("min_observations", 1)
+    mapping_on = mp.get("enabled", True)
     tag_size = cfg["tag"]["size_m"]
-    world = WorldModel(reference_id, min_obs, mapping=mapping_on, tag_size=tag_size)
+    # Critères de qualité (filtre + confirmation + pondération) -> pose fiable.
+    quality = dict(
+        min_margin=mp.get("min_decision_margin", 0.0),
+        min_tag_px=mp.get("min_tag_pixels", 0.0),
+        rot_coherence=mp.get("rot_coherence_min", 0.0),
+        max_trans_std=mp.get("max_trans_std_m", float("inf")),
+        refine_iters=mp.get("refine_iters", 0),
+        freeze_enabled=mp.get("freeze_confident", False),
+        freeze_px=mp.get("freeze_reproj_px", 1.2),
+        freeze_min_obs=mp.get("freeze_min_obs", 15),
+    )
+    world = WorldModel(reference_id, min_obs, mapping=mapping_on,
+                       tag_size=tag_size, **quality)
     trace_on = cfg["visualization"].get("trace", True)  # trace caméra en 3D
     viz = None  # la vue 3D s'ouvre à la demande (bouton "Afficher vue 3D")
     if cfg["visualization"].get("autostart", False):
@@ -178,7 +192,7 @@ def main():
     print("Vue caméra : panneau de boutons à droite "
           "(Enregistrer / Calib / Afficher vue 3D / Reset / Expo / Quitter).")
     print("Touches équivalentes (fenêtre caméra au focus) : "
-          "[q] quitter [s] save [r] reset [c] calib [v] vue 3D [t] trace [+/-] expo")
+          "[q] quitter [s] save [r] reset [c] calib [v] vue 3D [t] trace [a] affiner [+/-] expo")
     window_name = "AprilTag scan"
     menu = Menu()
     cv2.namedWindow(window_name)
@@ -195,6 +209,7 @@ def main():
     last_ver = -1
     base = None          # vidéo + overlay + HUD, recalculée à chaque NOUVELLE image
     exp_us = camera.get_exposure()  # en cache : évite un appel SDK par image
+    ref_seen = False     # le tag de référence a-t-il déjà été vu ? (sinon : aucune carte)
     try:
         while True:
             frame, ver = camera.latest()
@@ -234,14 +249,27 @@ def main():
                                  det_map1, det_map2, cv2.INTER_LINEAR)
                 detections = detector.detect(gray)
                 world.add_frame(detections)
+                if any(d.tag_id == reference_id for d in detections):
+                    ref_seen = True
                 base = cv2.remap(frame, disp_map1, disp_map2, cv2.INTER_LINEAR)
                 draw_overlay(base, detections, K_disp, tag_size,
                              reference_id, disp_scale, localized=world.poses)
                 status = f"tags localises: {len(world.poses)} | vus: {len(detections)}"
+                errs = [world.tag_error[t] for t in world.poses if t in world.tag_error]
+                if errs:
+                    status += f" | reproj moy: {sum(errs) / len(errs):.2f} px"
+                status += f" | img cles: {len(world.keyframes)}"
+                if world.frozen:
+                    status += f" | figes: {len(world.frozen)}"
                 if exp_us:
                     status += f" | expo: {exp_us:.0f} us"
                 cv2.putText(base, status, (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                # Avertissement : tag de référence jamais vu -> rien ne peut se localiser.
+                if not ref_seen:
+                    cv2.putText(base, f"!! tag REF {reference_id} jamais vu -> aucune carte",
+                                (10, base.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.7, (0, 0, 255), 2)
                 # Position de la caméra par rapport au tag de référence (origine).
                 # last_camera_pose = T_world_cam ; sa translation = X, Y, Z (m).
                 cp = world.last_camera_pose
@@ -261,7 +289,8 @@ def main():
             cv2.imshow(window_name, composite)
             # La vue 3D est optionnelle : si elle est fermée (X / q), on la masque
             # simplement (on NE quitte PAS l'application).
-            if viz is not None and not viz.update(world.poses, world.last_camera_pose):
+            if viz is not None and not viz.update(world.poses, world.last_camera_pose,
+                                                  world.tag_error, world.frozen):
                 viz.close()
                 viz = None
 
@@ -278,7 +307,7 @@ def main():
                 print(f"[export] {export_path} ({len(world.poses)} tags)")
             if action == "reset" or key == ord("r"):
                 world = WorldModel(reference_id, min_obs, mapping=world.mapping,
-                                   tag_size=tag_size)
+                                   tag_size=tag_size, **quality)
                 world.camera_matrix = K
                 print("[reset] world model réinitialisé")
             if action == "calib" or key == ord("c"):
@@ -296,6 +325,14 @@ def main():
                 if viz is not None:
                     viz.set_trajectory(trace_on)
                 print(f"[trace] {'ON' if trace_on else 'OFF'}")
+            if action == "refine" or key == ord("a"):
+                print(f"[bundle adjustment] optimisation ({len(world.keyframes)} images cles)...")
+                res = world.refine()
+                if res:
+                    print(f"[bundle adjustment] reproj {res[0]:.2f} -> {res[1]:.2f} px")
+                else:
+                    print("[bundle adjustment] pas assez de donnees "
+                          "(filme plusieurs tags sous des angles varies)")
             # Réglage live de l'exposition (-20 % / +25 %).
             exp_delta = None
             if action == "exp_down" or key == ord("-"):

@@ -1,0 +1,15 @@
+# Calibration intrinsèque d'une webcam (fournie par l'utilisateur).
+# fx, fy = focales (px) ; cx, cy = centre optique (px).
+# distortion = [k1, k2, p1, p2, k3] (modèle OpenCV).
+
+# Résolution À LAQUELLE la calibration a été faite (à corriger si différent).
+image_width: 1920
+image_height: 1080
+
+camera_matrix:
+  fx: 1217.46994
+  fy: 1217.47781
+  cx: 982.609
+  cy: 568.761
+
+distortion: [-0.4053, 0.2015, 0.00031, -0.00021, -0.0564]

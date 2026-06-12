@@ -11,7 +11,10 @@ gxipy/
 
 # Sorties générées à l'exécution
 world_model.json
+save/
 
 # Artefacts provenant d'autres outils
 DepthCamera_*.json
 DepthCapture_*.png
+ScreenCamera_*.json
+ScreenCapture_*.png
