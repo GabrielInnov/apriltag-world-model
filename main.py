@@ -155,13 +155,21 @@ class Menu:
         return None
 
 
+def select_intrinsics(cam_cfg, kind):
+    """Choisit le fichier de calibration selon la caméra réellement ouverte
+    (intrinsics_daheng / intrinsics_webcam / ... sinon repli sur `intrinsics`)."""
+    return cam_cfg.get(f"intrinsics_{kind}") or cam_cfg["intrinsics"]
+
+
 def main():
     cfg = load_yaml(os.path.join(HERE, "config.yaml"))
-    K, dist, cam_params, calib_width = load_intrinsics(
-        os.path.join(HERE, cfg["camera"]["intrinsics"])
-    )
 
+    # On ouvre la caméra D'ABORD, puis on charge LES intrinsèques correspondantes.
     camera = create_camera(cfg["camera"])
+    intr_path = select_intrinsics(cfg["camera"], getattr(camera, "kind", None))
+    print(f"[intrinsics] caméra '{getattr(camera, 'kind', '?')}' -> {intr_path}")
+    K, dist, cam_params, calib_width = load_intrinsics(os.path.join(HERE, intr_path))
+
     detector = TagDetector(
         cfg["tag"]["family"], cfg["tag"]["size_m"], cam_params, cfg.get("detection")
     )

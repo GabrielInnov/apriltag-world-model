@@ -23,6 +23,7 @@ except ImportError:
 # Palette épurée : couleur unique pour les tags, le tag de référence ressort.
 _TAG_COLOR = [0.32, 0.62, 0.85]   # bleu doux : tags ordinaires
 _REF_COLOR = [0.95, 0.60, 0.15]   # orange : tag de référence (origine)
+_FROZEN_COLOR = [0.10, 0.85, 0.20]  # vert : tag verrouillé (ne bougera plus)
 _CAM_COLOR = [0.35, 0.85, 0.45]   # vert : caméra
 _TRAJ_COLOR = [0.85, 0.86, 0.92]  # blanc cassé : trajectoire
 
@@ -234,13 +235,18 @@ class Visualizer:
                 self.vis.remove_geometry(g, reset_bounding_box=False)
             self._dynamic = []
 
-            # Tags : carré plein + contour (couleur = qualité ; contour blanc = figé).
+            # Tags : carré plein + contour. Couleur = qualité (vert->rouge), SAUF
+            # les tags figés : toujours VERTS (verrouillés, ils ne bougeront plus),
+            # avec un contour blanc pour les repérer.
             for tid, T in poses.items():
-                color = self._color_for(tid, tag_errors)
+                if tid in frozen:
+                    color = _FROZEN_COLOR
+                else:
+                    color = self._color_for(tid, tag_errors)
                 square = self._tag_square(T, color)
                 outline = self._tag_outline(T, color)
                 if tid in frozen:
-                    outline.paint_uniform_color([1.0, 1.0, 1.0])   # verrouillé
+                    outline.paint_uniform_color([1.0, 1.0, 1.0])   # bordure = verrouillé
                 for g in (square, outline):
                     self.vis.add_geometry(g, reset_bounding_box=False)
                     self._dynamic.append(g)

@@ -57,6 +57,8 @@ def _register_daheng_dll_path():
 class Camera:
     """Interface commune. Retourne des images BGR (convention OpenCV)."""
 
+    kind = None   # "daheng" | "webcam" | "video" : sert à choisir la calibration
+
     def read(self):
         raise NotImplementedError
 
@@ -100,6 +102,7 @@ class OpenCVCamera(Camera):
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         print(f"[camera] Webcam {w}x{h}.")
         self.source = source
+        self.kind = "video" if isinstance(source, str) else "webcam"
 
     def read(self):
         ok, frame = self.cap.read()
@@ -111,6 +114,8 @@ class OpenCVCamera(Camera):
 
 class DahengCamera(Camera):
     """Caméra Daheng via le SDK gxipy (acquisition continue)."""
+
+    kind = "daheng"
 
     def __init__(self, index=1, timeout_ms=1000, exposure_us=None, binning=1):
         _register_daheng_dll_path()
@@ -225,6 +230,7 @@ class AsyncCamera(Camera):
 
     def __init__(self, camera):
         self._cam = camera
+        self.kind = getattr(camera, "kind", None)
         self._lock = threading.Lock()
         self._frame = None
         self._version = 0
