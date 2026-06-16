@@ -3,6 +3,7 @@
 import os
 import sys
 import threading
+import time
 
 import cv2
 
@@ -84,7 +85,14 @@ class OpenCVCamera(Camera):
     """Webcam (index entier) ou fichier vidéo (chemin)."""
 
     def __init__(self, source=0, width=None, height=None):
-        self.cap = cv2.VideoCapture(source)
+        # Webcam (index entier) sur Windows : DirectShow est plus stable que le
+        # backend MSMF par défaut (qui provoque des "can't grab frame -2147024809").
+        if isinstance(source, int) and sys.platform == "win32":
+            self.cap = cv2.VideoCapture(source, cv2.CAP_DSHOW)
+            if not self.cap.isOpened():
+                self.cap = cv2.VideoCapture(source)   # repli backend par défaut
+        else:
+            self.cap = cv2.VideoCapture(source)
         if not self.cap.isOpened():
             raise RuntimeError(f"Impossible d'ouvrir la source vidéo : {source!r}")
         # Force la résolution de capture (pour coller à la calibration).
@@ -248,6 +256,8 @@ class AsyncCamera(Camera):
                 with self._lock:
                     self._frame = f
                     self._version += 1
+            else:
+                time.sleep(0.01)  # caméra muette/déconnectée : ne pas mitrailler
 
     def read(self):
         with self._lock:

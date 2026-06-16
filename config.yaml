@@ -35,8 +35,9 @@ mapping:
   refine_iters: 10          # optimisation du graphe de poses (fermeture de boucle) ; 0 = désactivé
   # --- Verrouillage des tags confiants (vert = on fige sa pose) ---
   freeze_confident: true    # figer la pose d'un tag une fois confiant
-  freeze_reproj_px: 1.2     # erreur de reprojection max ("vert") pour figer
+  freeze_reproj_px: 1.0     # erreur de reprojection max pour figer (plus bas = plus strict)
   freeze_min_obs: 15        # nb d'images min vu avant de pouvoir figer
+  freeze_min_views: 3       # nb de POINTS DE VUE distincts requis par tag (évite de figer un tag mal contraint, sans limite globale) ; un tag figé le reste définitivement
 
 visualization:
   enabled: true         # (réservé) visu 3D disponible

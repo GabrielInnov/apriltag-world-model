@@ -155,6 +155,24 @@ class Menu:
         return None
 
 
+def print_diagnostics(world, worst=8):
+    """Résumé console du diagnostic par tag, les plus FAIBLES d'abord (erreur de
+    reprojection élevée / peu d'angles), pour repérer ceux à re-filmer."""
+    diag = world.diagnostics()
+    if not diag:
+        return
+    rows = sorted(diag.items(),
+                  key=lambda kv: (kv[1]["reproj_px"] is None, -(kv[1]["reproj_px"] or 0)))
+    print(f"[diagnostic] {len(diag)} tags | "
+          f"{sum(1 for d in diag.values() if d['frozen'])} figés "
+          f"| tags les plus faibles :")
+    print("   id |  reproj | obs | vues | sauts | voisins | figé")
+    for tid, d in rows[:worst]:
+        rp = f"{d['reproj_px']:.2f}px" if d["reproj_px"] is not None else "  -  "
+        print(f"  {tid:3d} | {rp:>7} | {d['observations']:3d} | {d['viewpoints']:4d} "
+              f"| {str(d['hops_to_ref']):>5} | {d['neighbors']:7d} | {'oui' if d['frozen'] else 'non'}")
+
+
 def select_intrinsics(cam_cfg, kind):
     """Choisit le fichier de calibration selon la caméra réellement ouverte
     (intrinsics_daheng / intrinsics_webcam / ... sinon repli sur `intrinsics`)."""
@@ -186,8 +204,9 @@ def main():
         max_trans_std=mp.get("max_trans_std_m", float("inf")),
         refine_iters=mp.get("refine_iters", 0),
         freeze_enabled=mp.get("freeze_confident", False),
-        freeze_px=mp.get("freeze_reproj_px", 1.2),
+        freeze_px=mp.get("freeze_reproj_px", 1.0),
         freeze_min_obs=mp.get("freeze_min_obs", 15),
+        freeze_min_views=mp.get("freeze_min_views", 3),
     )
     world = WorldModel(reference_id, min_obs, mapping=mapping_on,
                        tag_size=tag_size, **quality)
@@ -218,6 +237,8 @@ def main():
     base = None          # vidéo + overlay + HUD, recalculée à chaque NOUVELLE image
     exp_us = camera.get_exposure()  # en cache : évite un appel SDK par image
     ref_seen = False     # le tag de référence a-t-il déjà été vu ? (sinon : aucune carte)
+    composite = None     # image affichée (vidéo + panneau), redessinée si besoin
+    last_state = None    # état du menu -> ne redessine que s'il change
     try:
         while True:
             frame, ver = camera.latest()
@@ -251,7 +272,8 @@ def main():
 
             # Détection/intégration + rendu UNIQUEMENT sur une image neuve (sinon on
             # réutilise `base` : la boucle reste fluide et réactive aux entrées).
-            if ver != last_ver:
+            new_frame = ver != last_ver
+            if new_frame:
                 last_ver = ver
                 gray = cv2.remap(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY),
                                  det_map1, det_map2, cv2.INTER_LINEAR)
@@ -293,8 +315,14 @@ def main():
                 cv2.putText(base, pos_txt, (10, 60),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.65, pos_col, 2)
 
-            composite = menu.render(base, world.mapping, viz is not None, trace_on)
-            cv2.imshow(window_name, composite)
+            # On ne reconstruit l'image composite (coûteux : copie + hstack) QUE si
+            # une nouvelle image est arrivée ou si l'état du menu a changé. Sinon
+            # la boucle ne ferait que brasser des allocations -> saturation mémoire.
+            state = (world.mapping, viz is not None, trace_on)
+            if new_frame or state != last_state or composite is None:
+                last_state = state
+                composite = menu.render(base, *state)
+                cv2.imshow(window_name, composite)
             # La vue 3D est optionnelle : si elle est fermée (X / q), on la masque
             # simplement (on NE quitte PAS l'application).
             if viz is not None and not viz.update(world.poses, world.last_camera_pose,
@@ -313,6 +341,7 @@ def main():
             if action == "save" or key == ord("s"):
                 save(world, export_path)
                 print(f"[export] {export_path} ({len(world.poses)} tags)")
+                print_diagnostics(world)
             if action == "reset" or key == ord("r"):
                 world = WorldModel(reference_id, min_obs, mapping=world.mapping,
                                    tag_size=tag_size, **quality)
@@ -357,6 +386,7 @@ def main():
     finally:
         save(world, export_path)
         print(f"[export final] {export_path} ({len(world.poses)} tags)")
+        print_diagnostics(world)
         camera.close()
         cv2.destroyAllWindows()
         if viz:

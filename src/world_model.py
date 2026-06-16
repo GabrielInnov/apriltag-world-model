@@ -56,7 +56,8 @@ class WorldModel:
     def __init__(self, reference_id, min_observations=1, mapping=True, tag_size=None,
                  min_margin=0.0, min_tag_px=0.0, rot_coherence=0.0,
                  max_trans_std=float("inf"), refine_iters=0,
-                 freeze_enabled=False, freeze_px=1.2, freeze_min_obs=15):
+                 freeze_enabled=False, freeze_px=1.0, freeze_min_obs=15,
+                 freeze_min_views=3):
         self.reference_id = reference_id
         self.min_observations = min_observations
         self.mapping = mapping           # True = on enrichit la carte ; False = figée
@@ -67,10 +68,15 @@ class WorldModel:
         # reprojection) et assez observé, sa pose est FIGÉE (ancre fixe). Évite qu'il
         # soit dégradé par des observations bruitées ultérieures.
         self.freeze_enabled = freeze_enabled
-        self.freeze_px = freeze_px           # seuil d'erreur de reprojection (px)
+        self.freeze_px = freeze_px           # erreur de reprojection max pour figer (px)
         self.freeze_min_obs = freeze_min_obs # nb d'images min vu avant de figer
-        self.frozen = set()                  # tags dont la pose est verrouillée
+        self.freeze_min_views = freeze_min_views  # nb de points de vue distincts requis
+        self.frozen = set()                  # tags dont la pose est verrouillée (définitif)
         self._tag_seen = defaultdict(int)    # tag_id -> nb d'images où il a été vu
+        # Diversité de points de vue PAR TAG (indépendante du plafond d'images clés
+        # du BA) : on accumule les directions de visée distinctes de chaque tag.
+        self._tag_bearings = defaultdict(list)  # tag_id -> [directions de visée]
+        self._view_cos_thr = np.cos(np.radians(8.0))  # 8° entre deux vues distinctes
         # Critères de QUALITÉ (par défaut neutres -> aucun filtrage ; activés par
         # main via la config). Un tag n'est "confirmé" (ajouté à la carte) que si
         # une arête vers la carte est fiable : assez d'observations + cohérente.
@@ -131,7 +137,8 @@ class WorldModel:
             mg >= self.min_margin and (sz is None or sz >= self.min_tag_px)
             for sz, mg in zip(sizes, margins)
         ])
-        wdet = np.array([sz if sz is not None else 1.0 for sz in sizes], dtype=float)
+        # Poids = taille apparente ; jamais nul (sinon division par 0 plus loin).
+        wdet = np.array([sz if sz else 1.0 for sz in sizes], dtype=float)
         if ok.sum() < 2:
             return
 
@@ -180,6 +187,8 @@ class WorldModel:
             Rs = Rotation.from_quat(V[:, :, -1]).as_matrix()    # (M, 3, 3)
             for idx, k in enumerate(dirty):
                 ws = self._edge_w[k]
+                if ws <= 0:
+                    continue
                 tmean = self._edge_tsum[k] / ws
                 coherence = evals[idx, -1] / ws                 # 1 = parfaitement aligné
                 var = max(0.0, self._edge_t2[k] / ws - float(tmean @ tmean))
@@ -230,13 +239,24 @@ class WorldModel:
         return poses
 
     def _update_frozen(self):
-        """Verrouille les tags devenus confiants (verts + assez observés)."""
+        """Verrouille les tags VRAIMENT bien contraints, et libère ceux qui se
+        révèlent incohérents.
+
+        Critères de gel (durcis pour éviter de figer un tag mal placé) :
+          - vu assez souvent (`freeze_min_obs`) ;
+          - vu sous PLUSIEURS points de vue distincts (`freeze_min_views`, compté
+            par tag, sans limite globale) -> pose bien triangulée, retournement levé ;
+          - faible erreur de reprojection (`freeze_px`).
+        Un tag figé le reste DÉFINITIVEMENT (ancre fixe). C'est donc le critère de
+        gel qui doit être sûr -> on ne fige que des tags vraiment bien contraints.
+        """
         if not self.freeze_enabled:
             return
-        for t in self.poses:
+        for t in list(self.poses):
             if t == self.reference_id or t in self.frozen:
                 continue
             if (self._tag_seen.get(t, 0) >= self.freeze_min_obs
+                    and len(self._tag_bearings.get(t, ())) >= self.freeze_min_views
                     and self.tag_error.get(t, 1e9) <= self.freeze_px):
                 self.frozen.add(t)
 
@@ -330,6 +350,20 @@ class WorldModel:
                 return
         self.keyframes.append({"cam": Tcw, "obs": obs})
 
+    def _note_viewpoint(self, tag_id, cam_pos):
+        """Mémorise une direction de visée du tag si elle est nouvelle (> 8° des
+        précédentes). Le nombre de directions = diversité de points de vue du tag,
+        indépendante du plafond d'images clés du BA."""
+        v = cam_pos - self.poses[tag_id][:3, 3]
+        n = np.linalg.norm(v)
+        if n < 1e-9:
+            return
+        v = v / n
+        dirs = self._tag_bearings[tag_id]
+        if all(float(v @ u) < self._view_cos_thr for u in dirs):  # assez différente
+            if len(dirs) < 30:
+                dirs.append(v)
+
     def _update_tag_errors(self, visible, T_world_cam):
         """Erreur de REPROJECTION par tag : on reprojette les coins 3D du tag (via
         la carte + la pose caméra) et on compare aux coins détectés. Indicateur de
@@ -338,9 +372,11 @@ class WorldModel:
             return
         Tcw = invert(T_world_cam)
         Rcw, tcw = Tcw[:3, :3], Tcw[:3, 3]
+        cam_pos = T_world_cam[:3, 3]
         corners3d = _TAG_CORNERS_UNIT * (self.tag_size / 2.0)
         for d in visible:
             self._tag_seen[d.tag_id] += 1
+            self._note_viewpoint(d.tag_id, cam_pos)        # diversité d'angles (gel)
             corners = getattr(d, "corners", None)
             if corners is None:
                 continue
@@ -458,6 +494,40 @@ class WorldModel:
         for ki in range(nkf):
             self.keyframes[ki]["cam"] = _params_to_pose(camP[ki])
         return (before, after)
+
+    def diagnostics(self):
+        """Diagnostic par tag (qualité / contraintes) :
+          - observations : nb d'images où le tag a été vu ;
+          - viewpoints   : nb d'angles de vue distincts ;
+          - reproj_px    : erreur de reprojection (px) ;
+          - hops_to_ref  : distance (sauts) au tag de référence dans le graphe ;
+          - neighbors    : nb de tags voisins (arêtes fiables) ;
+          - frozen       : pose verrouillée ?
+        Permet de repérer les tags faibles (peu vus / un seul angle / loin / élevé)."""
+        adj = defaultdict(list)
+        for (i, j), trusted in self._edge_trusted.items():
+            if trusted:
+                adj[i].append(j)
+        hops = {self.reference_id: 0}
+        queue = deque([self.reference_id])
+        while queue:
+            cur = queue.popleft()
+            for nxt in adj[cur]:
+                if nxt not in hops:
+                    hops[nxt] = hops[cur] + 1
+                    queue.append(nxt)
+        diag = {}
+        for t in self.poses:
+            err = self.tag_error.get(t)
+            diag[t] = {
+                "observations": int(self._tag_seen.get(t, 0)),
+                "viewpoints": len(self._tag_bearings.get(t, ())),
+                "reproj_px": round(err, 3) if err is not None else None,
+                "hops_to_ref": hops.get(t),
+                "neighbors": len(adj.get(t, [])),
+                "frozen": t in self.frozen,
+            }
+        return diag
 
     def stats(self):
         return {
