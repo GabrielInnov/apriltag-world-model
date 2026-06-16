@@ -6,15 +6,20 @@ tag:
   reference_id: 0        # id du tag qui définit l'origine du monde
 
 camera:
-  source: auto          # auto = Daheng si branchée, sinon webcam (branche/débranche sans rien changer)
+  source: auto          # auto (Daheng->webcam) | daheng | webcam | flir | <chemin vidéo>
   webcam_index: 1       # Logitech USB = index 1 (index 0 = cam integree 720p)
   webcam_width: 1920    # capture en 1920x1080 = résolution de calibration -> K exact
   webcam_height: 1080
   exposure_us: 1000     # Daheng : µs ou auto. (la webcam gère son expo seule)
   binning: 2            # Daheng : 1 ou 2 (ignoré pour la webcam)
+  # --- FLIR (Spinnaker / PySpin) : utilisée si source = flir ---
+  flir_serial: "25425519"   # série de la caméra FLIR (vide -> première détectée)
+  flir_index: 0             # utilisé si flir_serial vide
+  flir_exposure_us: auto    # µs ou auto
   # Intrinsèques choisies AUTOMATIQUEMENT selon la caméra réellement ouverte :
   intrinsics_daheng: calibration/camera_intrinsics.yaml
   intrinsics_webcam: calibration/webcam_intrinsics.yaml
+  intrinsics_flir: calibration/flir_intrinsics.yaml
   intrinsics: calibration/camera_intrinsics.yaml   # repli si type inconnu (ex. fichier vidéo)
 
 detection:

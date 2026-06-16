@@ -1,0 +1,16 @@
+# Calibration intrinsèque de la caméra FLIR (Spinnaker / PySpin).
+# Source : calibration utilisateur (format OpenCV converti).
+# fx, fy = focales (px) ; cx, cy = centre optique (px).
+# distortion = [k1, k2, p1, p2, k3] (modèle OpenCV).
+
+# Résolution de calibration (= résolution de capture pleine de la FLIR).
+image_width: 2448
+image_height: 2048
+
+camera_matrix:
+  fx: 2377.48919
+  fy: 2376.62193
+  cx: 1236.70610
+  cy: 1027.54182
+
+distortion: [-0.20139307, 0.14118002, 0.00034561, -0.00091613, -0.03747633]

@@ -231,6 +231,102 @@ class DahengCamera(Camera):
             pass
 
 
+class FlirCamera(Camera):
+    """Caméra FLIR via le SDK Spinnaker (PySpin). Image Mono8 -> convertie en BGR.
+
+    `PySpin` n'est pas sur PyPI : installe le Spinnaker SDK + le wheel PySpin.
+    Sans lui, l'import échoue et on bascule (selon la config) sur une autre source.
+    """
+
+    kind = "flir"
+
+    def __init__(self, serial=None, index=0, exposure_us=None, timeout_ms=200):
+        import PySpin  # importé tardivement : optionnel
+        self._PySpin = PySpin
+        self.timeout_ms = timeout_ms
+        self._system = PySpin.System.GetInstance()
+        self._cam_list = self._system.GetCameras()
+        if self._cam_list.GetSize() == 0:
+            self._release_system()
+            raise RuntimeError("Aucune caméra FLIR détectée")
+        if serial:
+            self._cam = self._cam_list.GetBySerial(str(serial))
+            if not self._cam.IsValid():
+                self._release_system()
+                raise RuntimeError(f"Caméra FLIR série {serial} introuvable")
+        else:
+            self._cam = self._cam_list.GetByIndex(index)
+        self._cam.Init()
+        try:
+            self._cam.PixelFormat.SetValue(PySpin.PixelFormat_Mono8)
+        except PySpin.SpinnakerException:
+            pass
+        self._cam.AcquisitionMode.SetValue(PySpin.AcquisitionMode_Continuous)
+        if exposure_us not in (None, "auto"):
+            self.set_exposure(exposure_us)
+        self._cam.BeginAcquisition()
+
+    def read(self):
+        try:
+            img = self._cam.GetNextImage(self.timeout_ms)
+        except self._PySpin.SpinnakerException:
+            return None
+        if img.IsIncomplete():
+            img.Release()
+            return None
+        arr = img.GetNDArray().copy()
+        img.Release()
+        if arr.ndim == 2:                      # Mono8 -> BGR (convention du pipeline)
+            return cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+        return arr
+
+    def set_exposure(self, microseconds):
+        """Fige l'exposition (et le gain) et règle le temps de pose (µs)."""
+        P = self._PySpin
+        for setter in (lambda: self._cam.ExposureAuto.SetValue(P.ExposureAuto_Off),
+                       lambda: self._cam.GainAuto.SetValue(P.GainAuto_Off)):
+            try:
+                setter()
+            except Exception:
+                pass
+        try:
+            us = float(microseconds)
+            us = max(self._cam.ExposureTime.GetMin(),
+                     min(self._cam.ExposureTime.GetMax(), us))
+            self._cam.ExposureTime.SetValue(us)
+            return us
+        except Exception:
+            return None
+
+    def get_exposure(self):
+        try:
+            return float(self._cam.ExposureTime.GetValue())
+        except Exception:
+            return None
+
+    def close(self):
+        try:
+            self._cam.EndAcquisition()
+        except Exception:
+            pass
+        try:
+            self._cam.DeInit()
+        except Exception:
+            pass
+        self._cam = None          # libère la réf avant de fermer le système (requis)
+        self._release_system()
+
+    def _release_system(self):
+        try:
+            self._cam_list.Clear()
+        except Exception:
+            pass
+        try:
+            self._system.ReleaseInstance()
+        except Exception:
+            pass
+
+
 class AsyncCamera(Camera):
     """Décorateur qui lit la caméra dans un thread de fond et conserve toujours
     la dernière image. La boucle principale récupère cette image SANS bloquer,
@@ -301,12 +397,33 @@ def create_camera(cfg):
                 raise
             print(f"[camera] Daheng indisponible ({e}). Fallback webcam/vidéo.")
 
+    if source in ("auto", "flir"):
+        try:
+            cam = FlirCamera(serial=cfg.get("flir_serial"),
+                             index=cfg.get("flir_index", 0),
+                             exposure_us=cfg.get("flir_exposure_us", "auto"))
+            exp = cam.get_exposure()
+            print(f"[camera] Caméra FLIR ouverte"
+                  + (f" (expo {exp:.0f} µs)" if exp else "") + ".")
+            return AsyncCamera(cam)  # lecture en thread -> UI réactive
+        except Exception as e:
+            if source == "flir":
+                raise
+            print(f"[camera] FLIR indisponible ({e}). Fallback webcam/vidéo.")
+
     # Chemin de fichier vidéo explicite : pas de thread (sinon lecture trop rapide).
     if isinstance(source, str) and source not in ("auto", "webcam"):
         print(f"[camera] Lecture du fichier vidéo : {source}")
         return OpenCVCamera(source)
 
+    # Webcam : on essaie l'index configuré, puis on balaie les autres (un débranchement
+    # ou un autre périphérique peut avoir décalé les index).
     idx = cfg.get("webcam_index", 0)
-    print(f"[camera] Ouverture de la webcam index {idx}.")
-    return AsyncCamera(OpenCVCamera(idx, cfg.get("webcam_width"),
-                                    cfg.get("webcam_height")))
+    w, h = cfg.get("webcam_width"), cfg.get("webcam_height")
+    for i in [idx] + [k for k in range(5) if k != idx]:
+        try:
+            return AsyncCamera(OpenCVCamera(i, w, h))
+        except RuntimeError:
+            if i == idx:
+                print(f"[camera] Webcam index {idx} indisponible, recherche d'un autre index...")
+    raise RuntimeError("Aucune webcam disponible (indices 0-4 testés).")
