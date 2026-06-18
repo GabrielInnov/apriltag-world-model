@@ -4,10 +4,11 @@ tag:
   family: tag36h11      # famille des marqueurs
   size_m: 0.023          # taille physique du tag en mètres (bord noir extérieur)
   reference_id: 0        # id du tag qui définit l'origine du monde
+  origin: bottom_left    # (0,0,0) sur le tag de référence : center | top_left | top_right | bottom_left | bottom_right
 
 camera:
   source: auto          # auto = Daheng si branchée, sinon webcam (branche/débranche sans rien changer)
-  webcam_index: 1       # Logitech USB = index 1 (index 0 = cam integree 720p)
+  webcam_index: 1       # Kurokesu USB = index 1 (index 0 = cam integree de l'ordi)
   webcam_width: 1920    # capture en 1920x1080 = résolution de calibration -> K exact
   webcam_height: 1080
   exposure_us: 1000     # Daheng : µs ou auto. (la webcam gère son expo seule)
@@ -33,8 +34,9 @@ mapping:
   rot_coherence_min: 0.99   # cohérence rotationnelle min (0..1) ; plus haut = plus exigeant
   max_trans_std_m: 0.05     # dispersion max de la translation (m) tolérée pour figer un tag
   refine_iters: 10          # optimisation du graphe de poses (fermeture de boucle) ; 0 = désactivé
-  # --- Verrouillage des tags confiants (vert = on fige sa pose) ---
-  freeze_confident: true    # figer la pose d'un tag une fois confiant
+  auto_refine: true         # lancer le bundle adjustment AUTOMATIQUEMENT à chaque sauvegarde (corrige la dérive Z)
+  # --- Verrouillage des tags confiants (désactivé : on laisse le BA tout ré-optimiser) ---
+  freeze_confident: false   # figer la pose d'un tag une fois confiant (false = recommandé)
   freeze_reproj_px: 1.0     # erreur de reprojection max pour figer (plus bas = plus strict)
   freeze_min_obs: 15        # nb d'images min vu avant de pouvoir figer
   freeze_min_views: 3       # nb de POINTS DE VUE distincts requis par tag (évite de figer un tag mal contraint, sans limite globale) ; un tag figé le reste définitivement

@@ -1,4 +1,4 @@
-# Calibration intrinsèque d'une webcam (fournie par l'utilisateur).
+# Calibration intrinsèque de la caméra Kurokesu (USB/UVC, objectif large).
 # fx, fy = focales (px) ; cx, cy = centre optique (px).
 # distortion = [k1, k2, p1, p2, k3] (modèle OpenCV).
 
@@ -7,9 +7,9 @@ image_width: 1920
 image_height: 1080
 
 camera_matrix:
-  fx: 1217.46994
-  fy: 1217.47781
-  cx: 982.609
-  cy: 568.761
+  fx: 1217.48097
+  fy: 1217.64870
+  cx: 979.268086
+  cy: 571.970030
 
-distortion: [-0.4053, 0.2015, 0.00031, -0.00021, -0.0564]
+distortion: [-0.405196651, 0.199778682, 0.000175806022, 0.000428400776, -0.0541096372]

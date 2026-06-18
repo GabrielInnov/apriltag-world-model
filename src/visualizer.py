@@ -29,12 +29,17 @@ _TRAJ_COLOR = [0.85, 0.86, 0.92]  # blanc cassé : trajectoire
 
 
 class Visualizer:
-    def __init__(self, tag_size=0.1, reference_id=0, show_trajectory=True):
+    def __init__(self, tag_size=0.1, reference_id=0, show_trajectory=True,
+                 origin_shift=None):
         self.enabled = _HAS_O3D
         self.tag_size = tag_size
         self.reference_id = reference_id
         self.show_trajectory = show_trajectory   # trace de la caméra affichée ?
         self._force_rebuild = False              # forcer un rebuild au prochain update
+        # Position (interne) du repère origine affiché : centre du tag réf (0) ou un
+        # coin (= -origin_shift). Le trièdre du monde y est dessiné.
+        self._origin_pos = (np.zeros(3) if origin_shift is None
+                            else -np.asarray(origin_shift, dtype=float))
         if not self.enabled:
             print("[viz] open3d non installé : visualisation 3D désactivée.")
             return
@@ -58,9 +63,10 @@ class Visualizer:
         except Exception:
             pass
 
-        # Scène épurée : seul le petit repère du monde (origine) est statique.
+        # Scène épurée : trièdre du monde, placé à l'ORIGINE choisie (coin bas-gauche
+        # du tag de référence si configuré, sinon son centre).
         world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
-            size=self.tag_size * 0.8
+            size=self.tag_size * 0.8, origin=self._origin_pos.tolist()
         )
         self.vis.add_geometry(world_frame)
 

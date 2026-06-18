@@ -18,3 +18,5 @@ DepthCamera_*.json
 DepthCapture_*.png
 ScreenCamera_*.json
 ScreenCapture_*.png
+
+world_model.csv

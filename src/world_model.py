@@ -73,6 +73,7 @@ class WorldModel:
         self.freeze_min_views = freeze_min_views  # nb de points de vue distincts requis
         self.frozen = set()                  # tags dont la pose est verrouillée (définitif)
         self._tag_seen = defaultdict(int)    # tag_id -> nb d'images où il a été vu
+        self._tag_radius = {}                # tag_id -> position image (0=centre, ~1=coin)
         # Diversité de points de vue PAR TAG (indépendante du plafond d'images clés
         # du BA) : on accumule les directions de visée distinctes de chaque tag.
         self._tag_bearings = defaultdict(list)  # tag_id -> [directions de visée]
@@ -97,6 +98,9 @@ class WorldModel:
         self.poses = {}                  # tag_id -> T_world_tag (4x4)
         self.tag_error = {}              # tag_id -> erreur de reprojection (px, lissée)
         self.last_camera_pose = None     # T_world_cam (4x4) pour la visu
+        # Décalage de l'origine rapportée (sortie) : 0 = centre du tag de référence.
+        # Pour mettre l'origine sur un coin, on ajoute ce vecteur aux translations.
+        self.origin_shift = np.zeros(3)
         # Images clés pour le bundle adjustment (vues diverses mémorisées).
         self.keyframes = []              # [{cam: T_cam_world, obs: [(tag_id, corners)]}]
         self.max_keyframes = 30
@@ -380,6 +384,12 @@ class WorldModel:
             corners = getattr(d, "corners", None)
             if corners is None:
                 continue
+            # Position image du tag (0 = centre, ~1 = coin) -> indicateur "bord de champ".
+            ctr = np.asarray(corners).mean(axis=0)
+            cx, cy = self.camera_matrix[0, 2], self.camera_matrix[1, 2]
+            radius = float(np.hypot(ctr[0] - cx, ctr[1] - cy) / np.hypot(cx, cy))
+            prev_r = self._tag_radius.get(d.tag_id)
+            self._tag_radius[d.tag_id] = radius if prev_r is None else 0.8 * prev_r + 0.2 * radius
             Tw = self.poses[d.tag_id]
             cw = corners3d @ Tw[:3, :3].T + Tw[:3, 3]      # coins -> monde
             cc = cw @ Rcw.T + tcw                           # -> repère caméra
@@ -519,15 +529,28 @@ class WorldModel:
         diag = {}
         for t in self.poses:
             err = self.tag_error.get(t)
+            r = self._tag_radius.get(t)
             diag[t] = {
                 "observations": int(self._tag_seen.get(t, 0)),
                 "viewpoints": len(self._tag_bearings.get(t, ())),
+                "parallax_deg": round(self._parallax_deg(t), 1),  # angle max de visée -> Z fiable
                 "reproj_px": round(err, 3) if err is not None else None,
+                "img_radius": round(r, 2) if r is not None else None,  # 0=centre, ~1=bord
                 "hops_to_ref": hops.get(t),
                 "neighbors": len(adj.get(t, [])),
                 "frozen": t in self.frozen,
             }
         return diag
+
+    def _parallax_deg(self, tag_id):
+        """Angle MAX entre les directions de visée du tag (bras de levier de
+        triangulation). Faible -> Z peu observable ; grand -> Z fiable."""
+        dirs = self._tag_bearings.get(tag_id, [])
+        if len(dirs) < 2:
+            return 0.0
+        B = np.array(dirs)
+        mindot = float(np.clip((B @ B.T).min(), -1.0, 1.0))
+        return float(np.degrees(np.arccos(mindot)))
 
     def stats(self):
         return {

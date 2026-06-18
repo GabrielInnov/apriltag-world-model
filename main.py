@@ -21,7 +21,7 @@ from camera import create_camera          # noqa: E402
 from detector import TagDetector          # noqa: E402
 from world_model import WorldModel        # noqa: E402
 from visualizer import Visualizer         # noqa: E402
-from exporter import save                 # noqa: E402
+from exporter import save, save_csv       # noqa: E402
 
 
 def load_yaml(path):
@@ -155,6 +155,17 @@ class Menu:
         return None
 
 
+def run_bundle_adjustment(world):
+    """Lance le bundle adjustment si possible (assez d'images clés) et affiche le
+    gain. Appelé automatiquement avant chaque sauvegarde si `auto_refine`."""
+    if len(world.keyframes) < 3:
+        return
+    print(f"[BA] optimisation ({len(world.keyframes)} images cles)...")
+    res = world.refine()
+    if res:
+        print(f"[BA] reproj {res[0]:.2f} -> {res[1]:.2f} px")
+
+
 def print_diagnostics(world, worst=8):
     """Résumé console du diagnostic par tag, les plus FAIBLES d'abord (erreur de
     reprojection élevée / peu d'angles), pour repérer ceux à re-filmer."""
@@ -166,11 +177,15 @@ def print_diagnostics(world, worst=8):
     print(f"[diagnostic] {len(diag)} tags | "
           f"{sum(1 for d in diag.values() if d['frozen'])} figés "
           f"| tags les plus faibles :")
-    print("   id |  reproj | obs | vues | sauts | voisins | figé")
+    print("   id |  reproj | bord | parallax(Z) | obs | vues | sauts | voisins | figé")
     for tid, d in rows[:worst]:
         rp = f"{d['reproj_px']:.2f}px" if d["reproj_px"] is not None else "  -  "
-        print(f"  {tid:3d} | {rp:>7} | {d['observations']:3d} | {d['viewpoints']:4d} "
-              f"| {str(d['hops_to_ref']):>5} | {d['neighbors']:7d} | {'oui' if d['frozen'] else 'non'}")
+        br = f"{d['img_radius']:.2f}" if d["img_radius"] is not None else "  - "
+        px = d.get("parallax_deg", 0.0)
+        flag = "!Z" if px < 10 else ("~Z" if px < 25 else "okZ")   # fiabilité de la profondeur
+        print(f"  {tid:3d} | {rp:>7} | {br:>4} | {px:5.1f}deg {flag:>3} | "
+              f"{d['observations']:3d} | {d['viewpoints']:4d} | {str(d['hops_to_ref']):>5} "
+              f"| {d['neighbors']:7d} | {'oui' if d['frozen'] else 'non'}")
 
 
 def select_intrinsics(cam_cfg, kind):
@@ -195,6 +210,7 @@ def main():
     mp = cfg["mapping"]
     min_obs = mp.get("min_observations", 1)
     mapping_on = mp.get("enabled", True)
+    auto_refine = mp.get("auto_refine", True)   # BA auto à la sauvegarde
     tag_size = cfg["tag"]["size_m"]
     # Critères de qualité (filtre + confirmation + pondération) -> pose fiable.
     quality = dict(
@@ -208,13 +224,21 @@ def main():
         freeze_min_obs=mp.get("freeze_min_obs", 15),
         freeze_min_views=mp.get("freeze_min_views", 3),
     )
+    # Origine rapportée : centre (défaut) ou un coin du tag de référence.
+    s = tag_size / 2.0
+    corner = {"center": (0, 0, 0), "top_left": (-s, s, 0), "top_right": (s, s, 0),
+              "bottom_left": (-s, -s, 0), "bottom_right": (s, -s, 0)}
+    origin_shift = -np.array(corner.get(cfg["tag"].get("origin", "center"), (0, 0, 0)),
+                             dtype=float)
     world = WorldModel(reference_id, min_obs, mapping=mapping_on,
                        tag_size=tag_size, **quality)
+    world.origin_shift = origin_shift
     trace_on = cfg["visualization"].get("trace", True)  # trace caméra en 3D
     viz = None  # la vue 3D s'ouvre à la demande (bouton "Afficher vue 3D")
     if cfg["visualization"].get("autostart", False):
-        viz = Visualizer(tag_size, reference_id, show_trajectory=trace_on)
+        viz = Visualizer(tag_size, reference_id, show_trajectory=trace_on, origin_shift=origin_shift)
     export_path = os.path.join(HERE, cfg["export"]["path"])
+    csv_path = os.path.splitext(export_path)[0] + ".csv"   # format Pupil Labs
 
     print("Vue caméra : panneau de boutons à droite "
           "(Enregistrer / Calib / Afficher vue 3D / Reset / Expo / Quitter).")
@@ -304,7 +328,7 @@ def main():
                 # last_camera_pose = T_world_cam ; sa translation = X, Y, Z (m).
                 cp = world.last_camera_pose
                 if cp is not None:
-                    x, y, z = cp[:3, 3]
+                    x, y, z = cp[:3, 3] + world.origin_shift   # origine = centre ou coin
                     d = float(np.linalg.norm((x, y, z)))
                     pos_txt = (f"cam/REF{reference_id} (m): "
                                f"X={x:+.3f} Y={y:+.3f} Z={z:+.3f}  d={d:.3f}")
@@ -339,20 +363,25 @@ def main():
             if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
                 break
             if action == "save" or key == ord("s"):
+                if auto_refine:
+                    run_bundle_adjustment(world)
                 save(world, export_path)
-                print(f"[export] {export_path} ({len(world.poses)} tags)")
+                save_csv(world, csv_path)
+                print(f"[export] {export_path} + {os.path.basename(csv_path)} "
+                      f"({len(world.poses)} tags)")
                 print_diagnostics(world)
             if action == "reset" or key == ord("r"):
                 world = WorldModel(reference_id, min_obs, mapping=world.mapping,
                                    tag_size=tag_size, **quality)
                 world.camera_matrix = K
+                world.origin_shift = origin_shift
                 print("[reset] world model réinitialisé")
             if action == "calib" or key == ord("c"):
                 world.mapping = not world.mapping
                 print(f"[calibration] {'ON (ajout des tags)' if world.mapping else 'OFF (carte figee, localisation seule)'}")
             if action == "viz" or key == ord("v"):
                 if viz is None:
-                    viz = Visualizer(tag_size, reference_id, show_trajectory=trace_on)
+                    viz = Visualizer(tag_size, reference_id, show_trajectory=trace_on, origin_shift=origin_shift)
                 else:
                     viz.close()
                     viz = None
@@ -384,8 +413,12 @@ def main():
                 else:
                     print("[expo] non réglable")
     finally:
+        if auto_refine:
+            run_bundle_adjustment(world)
         save(world, export_path)
-        print(f"[export final] {export_path} ({len(world.poses)} tags)")
+        save_csv(world, csv_path)
+        print(f"[export final] {export_path} + {os.path.basename(csv_path)} "
+              f"({len(world.poses)} tags)")
         print_diagnostics(world)
         camera.close()
         cv2.destroyAllWindows()
