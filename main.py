@@ -163,7 +163,7 @@ def run_bundle_adjustment(world):
     print(f"[BA] optimisation ({len(world.keyframes)} images cles)...")
     res = world.refine()
     if res:
-        print(f"[BA] reproj {res[0]:.2f} -> {res[1]:.2f} px")
+        print(f"[BA] reproj {res[0]:.2f} -> {res[1]:.2f} px ({res[2]} obs rejetees)")
 
 
 def print_diagnostics(world, worst=8):
@@ -395,7 +395,8 @@ def main():
                 print(f"[bundle adjustment] optimisation ({len(world.keyframes)} images cles)...")
                 res = world.refine()
                 if res:
-                    print(f"[bundle adjustment] reproj {res[0]:.2f} -> {res[1]:.2f} px")
+                    print(f"[bundle adjustment] reproj {res[0]:.2f} -> {res[1]:.2f} px "
+                          f"({res[2]} obs rejetees)")
                 else:
                     print("[bundle adjustment] pas assez de donnees "
                           "(filme plusieurs tags sous des angles varies)")

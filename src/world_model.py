@@ -103,7 +103,7 @@ class WorldModel:
         self.origin_shift = np.zeros(3)
         # Images clés pour le bundle adjustment (vues diverses mémorisées).
         self.keyframes = []              # [{cam: T_cam_world, obs: [(tag_id, corners)]}]
-        self.max_keyframes = 30
+        self.max_keyframes = 120   # + d'images clés (vues diverses) = BA plus reproductible
         self._kf_trans = tag_size or 0.02   # seuil de diversité en translation (m)
         self._kf_rot = 8.0                  # seuil de diversité en rotation (deg)
         self._avg_cache = {}             # (i, j) -> moyenne mise en cache
@@ -423,11 +423,14 @@ class WorldModel:
         R, _ = cv2.Rodrigues(rvec)
         return invert(make_transform(R, tvec.ravel()))   # T_cam_world -> T_world_cam
 
-    def refine(self):
-        """Bundle adjustment : optimise GLOBALEMENT les poses des tags et des
-        images clés pour minimiser l'erreur de reprojection des coins (méthode
-        Pupil Labs). Le tag de référence reste fixe (origine). Robuste (perte de
-        Huber). Renvoie (err_avant_px, err_apres_px) ou None. À lancer à la demande.
+    def refine(self, outlier_iters=3, outlier_px=2.5):
+        """Bundle adjustment ROBUSTE (façon Pupil Labs).
+
+        Optimise GLOBALEMENT les poses des tags + des images clés pour minimiser la
+        reprojection des coins, avec REJET ITÉRATIF des observations aberrantes
+        (retournements, tags de bord, détections bruitées) — c'est ce qui rend le
+        résultat REPRODUCTIBLE. Le tag de référence reste figé (origine).
+        Renvoie (err_avant_px, err_apres_px, n_obs_rejetées) ou None.
         """
         if self.camera_matrix is None or not self.tag_size or len(self.keyframes) < 3:
             return None
@@ -437,6 +440,7 @@ class WorldModel:
             return None
         tag_idx = {t: i for i, t in enumerate(tag_list)}
         ntag, nkf = len(tag_list), len(self.keyframes)
+        nparam = (ntag + nkf) * 6
         K = self.camera_matrix
         corners_unit = _TAG_CORNERS_UNIT * (self.tag_size / 2.0)
 
@@ -451,59 +455,72 @@ class WorldModel:
                 else:
                     continue
                 obs_kf.append(ki); obs_src.append(src); obs_uv.append(corners)
-        if len(obs_kf) < ntag + nkf:
+        No = len(obs_kf)
+        if No < ntag + nkf:
             return None
         obs_kf = np.array(obs_kf); obs_src = np.array(obs_src)
         obs_uv = np.stack(obs_uv)                                  # (No, 4, 2)
 
-        x0 = np.concatenate(
-            [np.concatenate([_pose_to_params(self.poses[t]) for t in tag_list]),
-             np.concatenate([_pose_to_params(kf["cam"]) for kf in self.keyframes])])
-
-        def residuals(x):
+        def reproj(x):                                            # (No, 4, 2) résidus
             tagP = x[:ntag * 6].reshape(ntag, 6)
             camP = x[ntag * 6:].reshape(nkf, 6)
             Rt = np.array([cv2.Rodrigues(p[:3])[0] for p in tagP])
             Rc = np.array([cv2.Rodrigues(p[:3])[0] for p in camP])
             WC = np.empty((ntag + 1, 4, 3))
             WC[0] = corners_unit                                   # référence
-            WC[1:] = np.einsum("tab,pb->tpa", Rt, corners_unit) + tagP[:, None, 3:6]
-            wc = WC[obs_src]                                        # (No,4,3) monde
+            if ntag:
+                WC[1:] = np.einsum("tab,pb->tpa", Rt, corners_unit) + tagP[:, None, 3:6]
+            wc = WC[obs_src]                                       # (No,4,3) monde
             cc = np.einsum("oab,opb->opa", Rc[obs_kf], wc) + camP[obs_kf, None, 3:6]
             uvh = np.einsum("ab,opb->opa", K, cc)
             z = np.where(np.abs(uvh[..., 2:3]) < 1e-6, 1e-6, uvh[..., 2:3])
-            return (uvh[..., :2] / z - obs_uv).ravel()
+            return uvh[..., :2] / z - obs_uv
 
         from scipy.sparse import lil_matrix
-        No = len(obs_kf)
-        S = lil_matrix((No * 8, (ntag + nkf) * 6), dtype=int)
-        for o in range(No):
-            r = slice(o * 8, o * 8 + 8)
-            if obs_src[o] > 0:
-                c = (obs_src[o] - 1) * 6
-                S[r, c:c + 6] = 1
-            c = ntag * 6 + obs_kf[o] * 6
-            S[r, c:c + 6] = 1
 
-        def px(res):
-            return float(np.linalg.norm(res.reshape(-1, 2), axis=1).mean())
+        def sparsity(idx):
+            S = lil_matrix((len(idx) * 8, nparam), dtype=int)
+            for row, o in enumerate(idx):
+                rr = slice(row * 8, row * 8 + 8)
+                if obs_src[o] > 0:
+                    c = (obs_src[o] - 1) * 6
+                    S[rr, c:c + 6] = 1
+                c = ntag * 6 + obs_kf[o] * 6
+                S[rr, c:c + 6] = 1
+            return S
 
-        before = px(residuals(x0))
-        try:
-            sol = least_squares(residuals, x0, jac_sparsity=S, method="trf",
-                                x_scale="jac", max_nfev=200)
-        except Exception:
-            return (before, before)
-        after = px(sol.fun)
-        if after >= before:                       # pas d'amélioration -> on ne touche rien
-            return (before, before)
-        tagP = sol.x[:ntag * 6].reshape(ntag, 6)
-        camP = sol.x[ntag * 6:].reshape(nkf, 6)
+        x = np.concatenate(
+            [np.concatenate([_pose_to_params(self.poses[t]) for t in tag_list]),
+             np.concatenate([_pose_to_params(kf["cam"]) for kf in self.keyframes])])
+        before = float(np.linalg.norm(reproj(x), axis=2).mean())
+        active = np.ones(No, dtype=bool)
+
+        for _ in range(max(1, outlier_iters)):
+            idx = np.nonzero(active)[0]
+            try:
+                sol = least_squares(lambda xx, ix=idx: reproj(xx)[ix].ravel(), x,
+                                    jac_sparsity=sparsity(idx), method="trf",
+                                    x_scale="jac", max_nfev=200)
+            except Exception:
+                break
+            x = sol.x
+            per_obs = np.linalg.norm(reproj(x), axis=2).mean(axis=1)   # (No,) px/coin
+            thr = max(outlier_px, 3.0 * float(np.median(per_obs[active])))
+            new_active = per_obs <= thr
+            if new_active.sum() < ntag + nkf:        # ne pas trop élaguer
+                break
+            if bool((new_active == active).all()):   # convergé
+                break
+            active = new_active
+
+        after = float(np.linalg.norm(reproj(x)[active], axis=2).mean())
+        tagP = x[:ntag * 6].reshape(ntag, 6)
+        camP = x[ntag * 6:].reshape(nkf, 6)
         for i, t in enumerate(tag_list):
             self.poses[t] = _params_to_pose(tagP[i])
         for ki in range(nkf):
             self.keyframes[ki]["cam"] = _params_to_pose(camP[ki])
-        return (before, after)
+        return (before, after, int((~active).sum()))
 
     def diagnostics(self):
         """Diagnostic par tag (qualité / contraintes) :
