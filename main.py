@@ -233,6 +233,8 @@ def main():
         acquire_min_obs=mp.get("acquire_min_obs", 30),
         semi_freeze=mp.get("semi_freeze", False),
         semi_freeze_strength=mp.get("semi_freeze_strength", 1.0),
+        live_anchor=mp.get("live_anchor", False),
+        live_anchor_move_mm=mp.get("live_anchor_move_mm", 0.5),
     )
     export_only_acquired = mp.get("export_only_acquired", False)
     # Origine rapportée : centre (défaut) ou un coin du tag de référence.
@@ -327,6 +329,8 @@ def main():
                 nacq = len(world.acquired_tags())
                 if nacq:
                     status += f" | acquis: {nacq}/{len(world.poses)}"
+                if world.live_anchored:
+                    status += f" | ancres: {len(world.live_anchored)}"
                 if world.frozen:
                     status += f" | figes: {len(world.frozen)}"
                 if exp_us:
@@ -366,7 +370,7 @@ def main():
             if viz is not None and not viz.update(world.poses, world.last_camera_pose,
                                                   world.tag_error, world.frozen,
                                                   world.tag_uncertainty,
-                                                  world.acquired_tags()):
+                                                  world.acquired_tags() | world.live_anchored):
                 viz.close()
                 viz = None
 

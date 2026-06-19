@@ -58,7 +58,8 @@ class WorldModel:
                  max_trans_std=float("inf"), refine_iters=0,
                  freeze_enabled=False, freeze_px=1.0, freeze_min_obs=15,
                  freeze_min_views=3, acquire_sigma_mm=1.0, acquire_parallax_deg=60.0,
-                 acquire_min_obs=30, semi_freeze=False, semi_freeze_strength=1.0):
+                 acquire_min_obs=30, semi_freeze=False, semi_freeze_strength=1.0,
+                 live_anchor=False, live_anchor_move_mm=0.5):
         self.reference_id = reference_id
         # Statut "acquis" : un tag est SÛR (vert) — filtre de confiance, pas un verrou.
         self.acquire_sigma_mm = acquire_sigma_mm        # incertitude max (mm)
@@ -68,6 +69,14 @@ class WorldModel:
         # verrou — le BA peut encore corriger). Stabilise sans graver d'erreur.
         self.semi_freeze = semi_freeze
         self.semi_freeze_strength = semi_freeze_strength  # px par mm de déviation
+        # Ancrage LIVE : fige les tags CONVERGÉS dans la relaxation temps réel (pour
+        # qu'ils arrêtent de bouger pendant le scan). N'affecte PAS le BA, qui
+        # ré-optimise tout librement à la sauvegarde -> aucune erreur gravée.
+        self.live_anchor = live_anchor
+        self.live_anchor_move_mm = live_anchor_move_mm
+        self.live_anchored = set()       # tags figés en live (convergés + bien vus)
+        self._prev_pos = {}              # pose précédente (pour mesurer la convergence)
+        self._tag_move = {}              # déplacement lissé entre solves (mm)
         self.min_observations = min_observations
         self.mapping = mapping           # True = on enrichit la carte ; False = figée
         self.tag_size = tag_size         # côté du tag (m), pour le PnP multi-tags
@@ -240,8 +249,8 @@ class WorldModel:
                 poses[nxt] = self.poses.get(nxt, poses[cur] @ avg[(cur, nxt)])
                 queue.append(nxt)
 
-        # Les tags figés gardent leur pose verrouillée (ancres fixes).
-        for t in self.frozen:
+        # Les tags figés (ou ancrés live) gardent leur pose : ancres fixes.
+        for t in self.frozen | self.live_anchored:
             if t in self.poses:
                 poses[t] = self.poses[t]
 
@@ -250,7 +259,35 @@ class WorldModel:
 
         self.poses = poses
         self._update_frozen()
+        self._update_live_anchor()
         return poses
+
+    def _update_live_anchor(self):
+        """Fige en LIVE les tags qui ont CONVERGÉ (pose stable entre deux solves) et
+        sont bien observés (parallaxe + observations) et cohérents (reprojection).
+        Recalculé à chaque image -> un tag qui redevient incohérent est relâché.
+        N'affecte que la relaxation temps réel ; le BA reste libre."""
+        # Convergence : déplacement (mm) de chaque pose depuis le solve précédent.
+        for t, T in self.poses.items():
+            p = T[:3, 3]
+            pp = self._prev_pos.get(t)
+            if pp is not None:
+                d = float(np.linalg.norm(p - pp)) * 1000.0
+                prev = self._tag_move.get(t)
+                self._tag_move[t] = d if prev is None else 0.6 * prev + 0.4 * d
+        self._prev_pos = {t: T[:3, 3].copy() for t, T in self.poses.items()}
+        if not self.live_anchor:
+            return
+        anchored = set()
+        for t in self.poses:
+            if t == self.reference_id:
+                continue
+            if (self._tag_seen.get(t, 0) >= self.acquire_min_obs
+                    and self._parallax_deg(t) >= self.acquire_parallax_deg
+                    and self._tag_move.get(t, 1e9) <= self.live_anchor_move_mm
+                    and self.tag_error.get(t, 1e9) <= 2.0):     # garde-fou cohérence
+                anchored.add(t)
+        self.live_anchored = anchored
 
     def _update_frozen(self):
         """Verrouille les tags VRAIMENT bien contraints, et libère ceux qui se
@@ -285,8 +322,8 @@ class WorldModel:
         tags = list(poses.keys())
         idx = {t: k for k, t in enumerate(tags)}
         ref_k = idx[self.reference_id]
-        # Indices à NE PAS bouger : référence + tags figés (ancres fixes).
-        fixed = {ref_k} | {idx[t] for t in self.frozen if t in idx}
+        # Indices à NE PAS bouger : référence + tags figés + ancrés live (ancres fixes).
+        fixed = {ref_k} | {idx[t] for t in (self.frozen | self.live_anchored) if t in idx}
         edges = [(i, j) for (i, j) in avg
                  if i in idx and j in idx and j != self.reference_id]
         if not edges:

@@ -45,6 +45,10 @@ mapping:
   # le BA peut encore corriger). Stabilise sans graver d'erreur.
   semi_freeze: true
   semi_freeze_strength: 1.0    # px par mm de déviation (plus haut = rappel plus fort)
+  # Ancrage LIVE : fige les tags CONVERGÉS pendant le scan (ils arrêtent de bouger à
+  # l'écran). N'affecte PAS le BA, qui ré-optimise tout à la sauvegarde -> sûr.
+  live_anchor: true
+  live_anchor_move_mm: 0.5     # un tag est "convergé" s'il bouge moins que ça entre 2 images
   # --- Verrouillage des tags confiants (désactivé : on laisse le BA tout ré-optimiser) ---
   freeze_confident: false   # figer la pose d'un tag une fois confiant (false = recommandé)
   freeze_reproj_px: 1.0     # erreur de reprojection max pour figer (plus bas = plus strict)
