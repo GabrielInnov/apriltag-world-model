@@ -35,6 +35,12 @@ mapping:
   max_trans_std_m: 0.05     # dispersion max de la translation (m) tolérée pour figer un tag
   refine_iters: 10          # optimisation du graphe de poses (fermeture de boucle) ; 0 = désactivé
   auto_refine: true         # lancer le bundle adjustment AUTOMATIQUEMENT à chaque sauvegarde (corrige la dérive Z)
+  # --- Statut "acquis" : un tag est SÛR (vert) sans être figé. C'est un filtre de
+  #     confiance (ajouter quand sûr), pas un verrou : le BA continue de tout optimiser. ---
+  acquire_sigma_mm: 1.0     # incertitude max (mm, issue du BA) pour qu'un tag soit "acquis"
+  acquire_parallax_deg: 60  # parallaxe min (deg) requise
+  acquire_min_obs: 30       # observations min requises
+  export_only_acquired: false  # n'exporter (JSON/CSV) QUE les tags acquis ?
   # --- Verrouillage des tags confiants (désactivé : on laisse le BA tout ré-optimiser) ---
   freeze_confident: false   # figer la pose d'un tag une fois confiant (false = recommandé)
   freeze_reproj_px: 1.0     # erreur de reprojection max pour figer (plus bas = plus strict)

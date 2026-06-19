@@ -172,20 +172,25 @@ def print_diagnostics(world, worst=8):
     diag = world.diagnostics()
     if not diag:
         return
-    rows = sorted(diag.items(),
-                  key=lambda kv: (kv[1]["reproj_px"] is None, -(kv[1]["reproj_px"] or 0)))
+    # Tri par INCERTITUDE (sigma mm) si dispo (= 'suis-je sûr ?'), sinon par reproj.
+    def sev(d):
+        u = d.get("uncertainty_mm")
+        return (0, -u) if u is not None else (1, -(d["reproj_px"] or 0))
+    rows = sorted(diag.items(), key=lambda kv: sev(kv[1]))
+    nacq = sum(1 for d in diag.values() if d.get("acquired"))
     print(f"[diagnostic] {len(diag)} tags | "
-          f"{sum(1 for d in diag.values() if d['frozen'])} figés "
-          f"| tags les plus faibles :")
-    print("   id |  reproj | bord | parallax(Z) | obs | vues | sauts | voisins | figé")
+          f"{nacq} acquis (sûrs) | tags les MOINS sûrs :")
+    print("   id |  sigma | reproj | bord | parallax(Z) | obs | vues | sauts | acquis")
     for tid, d in rows[:worst]:
+        u = d.get("uncertainty_mm")
+        sg = f"{u:.2f}mm" if u is not None else "  -   "
         rp = f"{d['reproj_px']:.2f}px" if d["reproj_px"] is not None else "  -  "
         br = f"{d['img_radius']:.2f}" if d["img_radius"] is not None else "  - "
         px = d.get("parallax_deg", 0.0)
-        flag = "!Z" if px < 10 else ("~Z" if px < 25 else "okZ")   # fiabilité de la profondeur
-        print(f"  {tid:3d} | {rp:>7} | {br:>4} | {px:5.1f}deg {flag:>3} | "
+        flag = "!Z" if px < 10 else ("~Z" if px < 25 else "okZ")   # fiabilité profondeur
+        print(f"  {tid:3d} | {sg:>6} | {rp:>7} | {br:>4} | {px:5.1f}deg {flag:>3} | "
               f"{d['observations']:3d} | {d['viewpoints']:4d} | {str(d['hops_to_ref']):>5} "
-              f"| {d['neighbors']:7d} | {'oui' if d['frozen'] else 'non'}")
+              f"| {'oui' if d.get('acquired') else 'non'}")
 
 
 def select_intrinsics(cam_cfg, kind):
@@ -223,7 +228,11 @@ def main():
         freeze_px=mp.get("freeze_reproj_px", 1.0),
         freeze_min_obs=mp.get("freeze_min_obs", 15),
         freeze_min_views=mp.get("freeze_min_views", 3),
+        acquire_sigma_mm=mp.get("acquire_sigma_mm", 1.0),
+        acquire_parallax_deg=mp.get("acquire_parallax_deg", 60.0),
+        acquire_min_obs=mp.get("acquire_min_obs", 30),
     )
+    export_only_acquired = mp.get("export_only_acquired", False)
     # Origine rapportée : centre (défaut) ou un coin du tag de référence.
     s = tag_size / 2.0
     corner = {"center": (0, 0, 0), "top_left": (-s, s, 0), "top_right": (s, s, 0),
@@ -313,6 +322,9 @@ def main():
                 if errs:
                     status += f" | reproj moy: {sum(errs) / len(errs):.2f} px"
                 status += f" | img cles: {len(world.keyframes)}"
+                nacq = len(world.acquired_tags())
+                if nacq:
+                    status += f" | acquis: {nacq}/{len(world.poses)}"
                 if world.frozen:
                     status += f" | figes: {len(world.frozen)}"
                 if exp_us:
@@ -350,7 +362,9 @@ def main():
             # La vue 3D est optionnelle : si elle est fermée (X / q), on la masque
             # simplement (on NE quitte PAS l'application).
             if viz is not None and not viz.update(world.poses, world.last_camera_pose,
-                                                  world.tag_error, world.frozen):
+                                                  world.tag_error, world.frozen,
+                                                  world.tag_uncertainty,
+                                                  world.acquired_tags()):
                 viz.close()
                 viz = None
 
@@ -365,10 +379,12 @@ def main():
             if action == "save" or key == ord("s"):
                 if auto_refine:
                     run_bundle_adjustment(world)
-                save(world, export_path)
-                save_csv(world, csv_path)
+                only = world.acquired_tags() if export_only_acquired else None
+                save(world, export_path, only)
+                save_csv(world, csv_path, only)
+                n = len(only) if only is not None else len(world.poses)
                 print(f"[export] {export_path} + {os.path.basename(csv_path)} "
-                      f"({len(world.poses)} tags)")
+                      f"({n} tags{' acquis' if only is not None else ''})")
                 print_diagnostics(world)
             if action == "reset" or key == ord("r"):
                 world = WorldModel(reference_id, min_obs, mapping=world.mapping,
@@ -416,10 +432,12 @@ def main():
     finally:
         if auto_refine:
             run_bundle_adjustment(world)
-        save(world, export_path)
-        save_csv(world, csv_path)
+        only = world.acquired_tags() if export_only_acquired else None
+        save(world, export_path, only)
+        save_csv(world, csv_path, only)
+        n = len(only) if only is not None else len(world.poses)
         print(f"[export final] {export_path} + {os.path.basename(csv_path)} "
-              f"({len(world.poses)} tags)")
+              f"({n} tags{' acquis' if only is not None else ''})")
         print_diagnostics(world)
         camera.close()
         cv2.destroyAllWindows()

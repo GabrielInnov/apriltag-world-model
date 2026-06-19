@@ -36,6 +36,7 @@ class Visualizer:
         self.reference_id = reference_id
         self.show_trajectory = show_trajectory   # trace de la caméra affichée ?
         self._force_rebuild = False              # forcer un rebuild au prochain update
+        self._color_x = {}                       # tag_id -> sévérité lissée (0=sûr..1=douteux)
         # Position (interne) du repère origine affiché : centre du tag réf (0) ou un
         # coin (= -origin_shift). Le trièdre du monde y est dessiné.
         self._origin_pos = (np.zeros(3) if origin_shift is None
@@ -152,14 +153,24 @@ class Visualizer:
             self.show_trajectory = on
             self._force_rebuild = True
 
-    def _color_for(self, tag_id, errors=None):
-        if tag_id == self.reference_id:
-            return _REF_COLOR
-        # Coloration par erreur de reprojection : vert (<=1 px) -> rouge (>=5 px).
+    def _severity(self, tag_id, uncertainty=None, errors=None):
+        """Sévérité 0 (sûr) .. 1 (douteux). Priorité à l'INCERTITUDE σ (mm, 0..5),
+        sinon repli sur l'erreur de reprojection (1..5 px)."""
+        if uncertainty and uncertainty.get(tag_id) is not None:
+            return min(1.0, max(0.0, uncertainty[tag_id] / 5.0))   # 0..5 mm
         if errors and tag_id in errors:
-            x = min(1.0, max(0.0, (errors[tag_id] - 1.0) / 4.0))
-            return [x, 1.0 - x, 0.15]          # RGB : vert = précis, rouge = douteux
-        return _TAG_COLOR
+            return min(1.0, max(0.0, (errors[tag_id] - 1.0) / 4.0))
+        return 0.0
+
+    def _grad_color(self, tag_id, target_x):
+        """Couleur vert->rouge via la TEINTE (HSV) = dégradé continu et lisse, et
+        LISSAGE temporel par tag (EMA) pour éviter les changements brusques."""
+        import colorsys
+        prev = self._color_x.get(tag_id)
+        x = target_x if prev is None else 0.75 * prev + 0.25 * target_x
+        self._color_x[tag_id] = x
+        h = 0.33 * (1.0 - x)                    # 0.33 = vert, 0.0 = rouge (jaune au milieu)
+        return list(colorsys.hsv_to_rgb(h, 0.85, 0.9))
 
     def _tag_corners(self, T):
         h = self.tag_size / 2.0
@@ -212,10 +223,13 @@ class Visualizer:
         return ls
 
     # ----------------------------------------------------------------- update
-    def update(self, poses, camera_pose=None, tag_errors=None, frozen=()):
-        """Met à jour la scène 3D. `tag_errors` (id->px) colore les tags du vert
-        (précis) au rouge (douteux) ; les tags `frozen` (verrouillés) ont un contour
-        blanc. Retourne False si la fenêtre doit se fermer."""
+    def update(self, poses, camera_pose=None, tag_errors=None, frozen=(),
+               tag_uncertainty=None, acquired=()):
+        """Met à jour la scène 3D. Les tags sont colorés du vert (sûr) au rouge
+        (douteux) selon l'INCERTITUDE σ (mm) si dispo, sinon la reprojection ;
+        dégradé continu (HSV) + lissage temporel pour éviter les à-coups. Les tags
+        `acquired` (sûrs) ont un CONTOUR VERT ; les `frozen` un contour blanc.
+        Retourne False si la fenêtre doit se fermer."""
         if not self.enabled:
             return True
 
@@ -245,14 +259,19 @@ class Visualizer:
             # les tags figés : toujours VERTS (verrouillés, ils ne bougeront plus),
             # avec un contour blanc pour les repérer.
             for tid, T in poses.items():
-                if tid in frozen:
+                if tid == self.reference_id:
+                    color = _REF_COLOR
+                elif tid in frozen:
                     color = _FROZEN_COLOR
                 else:
-                    color = self._color_for(tid, tag_errors)
+                    color = self._grad_color(
+                        tid, self._severity(tid, tag_uncertainty, tag_errors))
                 square = self._tag_square(T, color)
                 outline = self._tag_outline(T, color)
                 if tid in frozen:
                     outline.paint_uniform_color([1.0, 1.0, 1.0])   # bordure = verrouillé
+                elif tid in acquired and tid != self.reference_id:
+                    outline.paint_uniform_color(_FROZEN_COLOR)     # contour vert = acquis (sûr)
                 for g in (square, outline):
                     self.vis.add_geometry(g, reset_bounding_box=False)
                     self._dynamic.append(g)

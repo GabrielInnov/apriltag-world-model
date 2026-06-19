@@ -57,8 +57,13 @@ class WorldModel:
                  min_margin=0.0, min_tag_px=0.0, rot_coherence=0.0,
                  max_trans_std=float("inf"), refine_iters=0,
                  freeze_enabled=False, freeze_px=1.0, freeze_min_obs=15,
-                 freeze_min_views=3):
+                 freeze_min_views=3, acquire_sigma_mm=1.0, acquire_parallax_deg=60.0,
+                 acquire_min_obs=30):
         self.reference_id = reference_id
+        # Statut "acquis" : un tag est SÛR (vert) — filtre de confiance, pas un verrou.
+        self.acquire_sigma_mm = acquire_sigma_mm        # incertitude max (mm)
+        self.acquire_parallax_deg = acquire_parallax_deg  # parallaxe min (deg)
+        self.acquire_min_obs = acquire_min_obs          # observations min
         self.min_observations = min_observations
         self.mapping = mapping           # True = on enrichit la carte ; False = figée
         self.tag_size = tag_size         # côté du tag (m), pour le PnP multi-tags
@@ -74,6 +79,7 @@ class WorldModel:
         self.frozen = set()                  # tags dont la pose est verrouillée (définitif)
         self._tag_seen = defaultdict(int)    # tag_id -> nb d'images où il a été vu
         self._tag_radius = {}                # tag_id -> position image (0=centre, ~1=coin)
+        self.tag_uncertainty = {}            # tag_id -> sigma de position (mm) issu du BA
         # Diversité de points de vue PAR TAG (indépendante du plafond d'images clés
         # du BA) : on accumule les directions de visée distinctes de chaque tag.
         self._tag_bearings = defaultdict(list)  # tag_id -> [directions de visée]
@@ -494,6 +500,7 @@ class WorldModel:
              np.concatenate([_pose_to_params(kf["cam"]) for kf in self.keyframes])])
         before = float(np.linalg.norm(reproj(x), axis=2).mean())
         active = np.ones(No, dtype=bool)
+        sol = None
 
         for _ in range(max(1, outlier_iters)):
             idx = np.nonzero(active)[0]
@@ -520,7 +527,46 @@ class WorldModel:
             self.poses[t] = _params_to_pose(tagP[i])
         for ki in range(nkf):
             self.keyframes[ki]["cam"] = _params_to_pose(camP[ki])
+
+        self._estimate_uncertainty(sol, tag_list, ntag, nparam)
         return (before, after, int((~active).sum()))
+
+    def _estimate_uncertainty(self, sol, tag_list, ntag, nparam):
+        """Incertitude de position par tag (sigma en mm) depuis la covariance du BA :
+        Cov = sigma0^2 * (JtJ)^-1, sigma0^2 = variance des résidus. On extrait le bloc
+        translation 3x3 de chaque tag -> rayon 1-sigma. C'est la mesure 'suis-je sûr ?'
+        en un seul scan (elle prédit la répétabilité)."""
+        if sol is None or nparam > 3000:        # au-delà, inversion trop lourde -> on saute
+            return
+        try:
+            import scipy.sparse as sp
+            J = sol.jac
+            JtJ = J.T @ J
+            JtJ = JtJ.toarray() if sp.issparse(JtJ) else np.asarray(JtJ)
+            dof = max(1, J.shape[0] - nparam)
+            sigma0_sq = 2.0 * float(sol.cost) / dof          # variance du bruit (px^2)
+            cov = np.linalg.pinv(JtJ) * sigma0_sq            # bloc translation -> m^2
+            for i, t in enumerate(tag_list):
+                b = i * 6 + 3
+                var = float(np.trace(cov[b:b + 3, b:b + 3]))
+                self.tag_uncertainty[t] = float(np.sqrt(max(var, 0.0)) * 1000.0)  # -> mm
+            self.tag_uncertainty[self.reference_id] = 0.0
+        except Exception:
+            pass
+
+    def is_acquired(self, t):
+        """Tag SÛR ? Filtre de confiance (σ + parallaxe + observations). PAS un
+        verrou : le tag reste optimisé par le BA. σ vient du dernier bundle
+        adjustment (None tant qu'aucun BA n'a tourné)."""
+        if t == self.reference_id:
+            return True
+        s = self.tag_uncertainty.get(t)
+        return (s is not None and s <= self.acquire_sigma_mm
+                and self._parallax_deg(t) >= self.acquire_parallax_deg
+                and self._tag_seen.get(t, 0) >= self.acquire_min_obs)
+
+    def acquired_tags(self):
+        return {t for t in self.poses if self.is_acquired(t)}
 
     def diagnostics(self):
         """Diagnostic par tag (qualité / contraintes) :
@@ -552,6 +598,9 @@ class WorldModel:
                 "viewpoints": len(self._tag_bearings.get(t, ())),
                 "parallax_deg": round(self._parallax_deg(t), 1),  # angle max de visée -> Z fiable
                 "reproj_px": round(err, 3) if err is not None else None,
+                "uncertainty_mm": (round(self.tag_uncertainty[t], 2)
+                                   if t in self.tag_uncertainty else None),  # sigma BA
+                "acquired": self.is_acquired(t),     # sûr (σ + parallaxe + obs) ?
                 "img_radius": round(r, 2) if r is not None else None,  # 0=centre, ~1=bord
                 "hops_to_ref": hops.get(t),
                 "neighbors": len(adj.get(t, [])),

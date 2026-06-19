@@ -9,11 +9,14 @@ from scipy.spatial.transform import Rotation
 from transforms import transform_to_dict
 
 
-def save(world_model, path):
+def save(world_model, path, only=None):
+    """`only` : ensemble d'ids à exporter (None = tous)."""
     diag = world_model.diagnostics()
     shift = getattr(world_model, "origin_shift", None)
     tags = {}
     for tid, T in sorted(world_model.poses.items()):
+        if only is not None and tid not in only:
+            continue
         if shift is not None:
             T = T.copy()
             T[:3, 3] = T[:3, 3] + shift     # origine = centre ou coin du tag réf
@@ -31,16 +34,19 @@ def save(world_model, path):
     return path
 
 
-def save_csv(world_model, path):
+def save_csv(world_model, path, only=None):
     """Exporte le world model au format `head_pose_tracker_model.csv` (Pupil Labs) :
     une ligne par marqueur, rotation (VECTEUR de rotation, en degrés) + translation
-    (en mm). Le tag de référence est à (0,0,0). Origine = centre (ou coin si configuré)."""
+    (en mm). Le tag de référence est à (0,0,0). Origine = centre (ou coin si configuré).
+    `only` : ensemble d'ids à exporter (None = tous)."""
     shift = getattr(world_model, "origin_shift", None)
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["marker_id", "rotation_x", "rotation_y", "rotation_z",
                     "translation_x", "translation_y", "translation_z"])
         for tid, T in sorted(world_model.poses.items()):
+            if only is not None and tid not in only:
+                continue
             rvec_deg = np.degrees(Rotation.from_matrix(T[:3, :3]).as_rotvec())
             t = T[:3, 3] + (shift if shift is not None else 0.0)
             t_mm = t * 1000.0                                   # mètres -> millimètres
