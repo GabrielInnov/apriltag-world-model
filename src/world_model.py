@@ -59,7 +59,7 @@ class WorldModel:
                  freeze_enabled=False, freeze_px=1.0, freeze_min_obs=15,
                  freeze_min_views=3, acquire_sigma_mm=1.0, acquire_parallax_deg=60.0,
                  acquire_min_obs=30, semi_freeze=False, semi_freeze_strength=1.0,
-                 live_anchor=False, live_anchor_move_mm=0.5):
+                 live_anchor=False, live_anchor_move_mm=0.5, live_anchor_reproj_px=2.0):
         self.reference_id = reference_id
         # Statut "acquis" : un tag est SÛR (vert) — filtre de confiance, pas un verrou.
         self.acquire_sigma_mm = acquire_sigma_mm        # incertitude max (mm)
@@ -74,6 +74,7 @@ class WorldModel:
         # ré-optimise tout librement à la sauvegarde -> aucune erreur gravée.
         self.live_anchor = live_anchor
         self.live_anchor_move_mm = live_anchor_move_mm
+        self.live_anchor_reproj_px = live_anchor_reproj_px  # garde-fou cohérence (relâche si dépassé)
         self.live_anchored = set()       # tags figés en live (convergés + bien vus)
         self._prev_pos = {}              # pose précédente (pour mesurer la convergence)
         self._tag_move = {}              # déplacement lissé entre solves (mm)
@@ -93,9 +94,11 @@ class WorldModel:
         self._tag_seen = defaultdict(int)    # tag_id -> nb d'images où il a été vu
         self._tag_radius = {}                # tag_id -> position image (0=centre, ~1=coin)
         self.tag_uncertainty = {}            # tag_id -> sigma de position (mm) issu du BA
+        self.tag_sigma_xyz = {}              # tag_id -> (sigma_x, sigma_y, sigma_z) mm
         # Diversité de points de vue PAR TAG (indépendante du plafond d'images clés
         # du BA) : on accumule les directions de visée distinctes de chaque tag.
         self._tag_bearings = defaultdict(list)  # tag_id -> [directions de visée]
+        self._parallax_cache = {}            # tag_id -> parallaxe (deg), invalidé si nouvelle visée
         self._view_cos_thr = np.cos(np.radians(8.0))  # 8° entre deux vues distinctes
         # Critères de QUALITÉ (par défaut neutres -> aucun filtrage ; activés par
         # main via la config). Un tag n'est "confirmé" (ajouté à la carte) que si
@@ -285,7 +288,7 @@ class WorldModel:
             if (self._tag_seen.get(t, 0) >= self.acquire_min_obs
                     and self._parallax_deg(t) >= self.acquire_parallax_deg
                     and self._tag_move.get(t, 1e9) <= self.live_anchor_move_mm
-                    and self.tag_error.get(t, 1e9) <= 2.0):     # garde-fou cohérence
+                    and self.tag_error.get(t, 1e9) <= self.live_anchor_reproj_px):
                 anchored.add(t)
         self.live_anchored = anchored
 
@@ -414,6 +417,7 @@ class WorldModel:
         if all(float(v @ u) < self._view_cos_thr for u in dirs):  # assez différente
             if len(dirs) < 30:
                 dirs.append(v)
+                self._parallax_cache.pop(tag_id, None)   # diversité changée -> recalcul
 
     def _update_tag_errors(self, visible, T_world_cam):
         """Erreur de REPROJECTION par tag : on reprojette les coins 3D du tag (via
@@ -619,12 +623,18 @@ class WorldModel:
             JtJ = JtJ.toarray() if sp.issparse(JtJ) else np.asarray(JtJ)
             dof = max(1, J.shape[0] - nparam)
             sigma0_sq = float(resid_data @ resid_data) / dof  # variance du bruit (px^2)
-            cov = np.linalg.pinv(JtJ) * sigma0_sq            # bloc translation -> m^2
+            try:
+                inv = np.linalg.inv(JtJ)                     # plus rapide (JtJ régulière)
+            except np.linalg.LinAlgError:
+                inv = np.linalg.pinv(JtJ)                    # repli si quasi-singulière
+            cov = inv * sigma0_sq                            # bloc translation -> m^2
             for i, t in enumerate(tag_list):
                 b = i * 6 + 3
-                var = float(np.trace(cov[b:b + 3, b:b + 3]))
-                self.tag_uncertainty[t] = float(np.sqrt(max(var, 0.0)) * 1000.0)  # -> mm
+                diag = np.clip(np.diag(cov)[b:b + 3], 0.0, None)   # var. par axe (m^2)
+                self.tag_sigma_xyz[t] = tuple(float(np.sqrt(v) * 1000.0) for v in diag)
+                self.tag_uncertainty[t] = float(np.sqrt(diag.sum()) * 1000.0)  # rayon (mm)
             self.tag_uncertainty[self.reference_id] = 0.0
+            self.tag_sigma_xyz[self.reference_id] = (0.0, 0.0, 0.0)
         except Exception:
             pass
 
@@ -674,6 +684,8 @@ class WorldModel:
                 "reproj_px": round(err, 3) if err is not None else None,
                 "uncertainty_mm": (round(self.tag_uncertainty[t], 2)
                                    if t in self.tag_uncertainty else None),  # sigma BA
+                "sigma_xyz_mm": ([round(v, 2) for v in self.tag_sigma_xyz[t]]
+                                 if t in self.tag_sigma_xyz else None),  # σ par axe
                 "acquired": self.is_acquired(t),     # sûr (σ + parallaxe + obs) ?
                 "img_radius": round(r, 2) if r is not None else None,  # 0=centre, ~1=bord
                 "hops_to_ref": hops.get(t),
@@ -685,12 +697,35 @@ class WorldModel:
     def _parallax_deg(self, tag_id):
         """Angle MAX entre les directions de visée du tag (bras de levier de
         triangulation). Faible -> Z peu observable ; grand -> Z fiable."""
+        cached = self._parallax_cache.get(tag_id)
+        if cached is not None:
+            return cached
         dirs = self._tag_bearings.get(tag_id, [])
         if len(dirs) < 2:
             return 0.0
         B = np.array(dirs)
         mindot = float(np.clip((B @ B.T).min(), -1.0, 1.0))
-        return float(np.degrees(np.arccos(mindot)))
+        val = float(np.degrees(np.arccos(mindot)))
+        self._parallax_cache[tag_id] = val
+        return val
+
+    def health(self):
+        """Synthèse globale 'go/no-go' de la carte : combien de tags sûrs, quelle
+        incertitude, quels points faibles (mal connectés, parallaxe insuffisante,
+        loin de la référence)."""
+        d = self.diagnostics()
+        sig = [v["uncertainty_mm"] for v in d.values() if v.get("uncertainty_mm") is not None]
+        hops = [v["hops_to_ref"] for v in d.values() if v.get("hops_to_ref") is not None]
+        return {
+            "tags": len(d),
+            "acquired": sum(1 for v in d.values() if v.get("acquired")),
+            "sigma_med_mm": round(float(np.median(sig)), 2) if sig else None,
+            "sigma_max_mm": round(float(np.max(sig)), 2) if sig else None,
+            "max_hops": max(hops) if hops else None,
+            "weakly_connected": sum(1 for v in d.values() if v.get("neighbors", 0) < 2),
+            "low_parallax": sum(1 for v in d.values()
+                                if v.get("parallax_deg", 0.0) < self.acquire_parallax_deg),
+        }
 
     def stats(self):
         return {

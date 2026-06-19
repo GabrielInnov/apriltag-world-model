@@ -177,9 +177,11 @@ def print_diagnostics(world, worst=8):
         u = d.get("uncertainty_mm")
         return (0, -u) if u is not None else (1, -(d["reproj_px"] or 0))
     rows = sorted(diag.items(), key=lambda kv: sev(kv[1]))
-    nacq = sum(1 for d in diag.values() if d.get("acquired"))
-    print(f"[diagnostic] {len(diag)} tags | "
-          f"{nacq} acquis (sûrs) | tags les MOINS sûrs :")
+    h = world.health()
+    print(f"[sante] {h['acquired']}/{h['tags']} acquis | sigma med "
+          f"{h['sigma_med_mm']} / max {h['sigma_max_mm']} mm | sauts max {h['max_hops']} "
+          f"| {h['weakly_connected']} peu connectes | {h['low_parallax']} parallaxe faible")
+    print(f"[diagnostic] tags les MOINS sûrs :")
     print("   id |  sigma | reproj | bord | parallax(Z) | obs | vues | sauts | acquis")
     for tid, d in rows[:worst]:
         u = d.get("uncertainty_mm")
@@ -235,6 +237,7 @@ def main():
         semi_freeze_strength=mp.get("semi_freeze_strength", 1.0),
         live_anchor=mp.get("live_anchor", False),
         live_anchor_move_mm=mp.get("live_anchor_move_mm", 0.5),
+        live_anchor_reproj_px=mp.get("live_anchor_reproj_px", 2.0),
     )
     export_only_acquired = mp.get("export_only_acquired", False)
     # Origine rapportée : centre (défaut) ou un coin du tag de référence.
@@ -276,6 +279,7 @@ def main():
     ref_seen = False     # le tag de référence a-t-il déjà été vu ? (sinon : aucune carte)
     composite = None     # image affichée (vidéo + panneau), redessinée si besoin
     last_state = None    # état du menu -> ne redessine que s'il change
+    green = set()        # tags acquis | ancrés (recalculé seulement sur image neuve)
     try:
         while True:
             frame, ver = camera.latest()
@@ -326,9 +330,10 @@ def main():
                 if errs:
                     status += f" | reproj moy: {sum(errs) / len(errs):.2f} px"
                 status += f" | img cles: {len(world.keyframes)}"
-                nacq = len(world.acquired_tags())
-                if nacq:
-                    status += f" | acquis: {nacq}/{len(world.poses)}"
+                acquired = world.acquired_tags()
+                green = acquired | world.live_anchored   # réutilisé par la vue 3D
+                if acquired:
+                    status += f" | acquis: {len(acquired)}/{len(world.poses)}"
                 if world.live_anchored:
                     status += f" | ancres: {len(world.live_anchored)}"
                 if world.frozen:
@@ -369,8 +374,7 @@ def main():
             # simplement (on NE quitte PAS l'application).
             if viz is not None and not viz.update(world.poses, world.last_camera_pose,
                                                   world.tag_error, world.frozen,
-                                                  world.tag_uncertainty,
-                                                  world.acquired_tags() | world.live_anchored):
+                                                  world.tag_uncertainty, green):
                 viz.close()
                 viz = None
 
