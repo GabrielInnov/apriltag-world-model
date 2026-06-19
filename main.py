@@ -231,6 +231,8 @@ def main():
         acquire_sigma_mm=mp.get("acquire_sigma_mm", 1.0),
         acquire_parallax_deg=mp.get("acquire_parallax_deg", 60.0),
         acquire_min_obs=mp.get("acquire_min_obs", 30),
+        semi_freeze=mp.get("semi_freeze", False),
+        semi_freeze_strength=mp.get("semi_freeze_strength", 1.0),
     )
     export_only_acquired = mp.get("export_only_acquired", False)
     # Origine rapportée : centre (défaut) ou un coin du tag de référence.

@@ -41,6 +41,10 @@ mapping:
   acquire_parallax_deg: 60  # parallaxe min (deg) requise
   acquire_min_obs: 30       # observations min requises
   export_only_acquired: false  # n'exporter (JSON/CSV) QUE les tags acquis ?
+  # Semi-gel : rappel SOUPLE des tags acquis vers leur pose dans le BA (pas un verrou,
+  # le BA peut encore corriger). Stabilise sans graver d'erreur.
+  semi_freeze: true
+  semi_freeze_strength: 1.0    # px par mm de déviation (plus haut = rappel plus fort)
   # --- Verrouillage des tags confiants (désactivé : on laisse le BA tout ré-optimiser) ---
   freeze_confident: false   # figer la pose d'un tag une fois confiant (false = recommandé)
   freeze_reproj_px: 1.0     # erreur de reprojection max pour figer (plus bas = plus strict)

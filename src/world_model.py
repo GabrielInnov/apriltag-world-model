@@ -58,12 +58,16 @@ class WorldModel:
                  max_trans_std=float("inf"), refine_iters=0,
                  freeze_enabled=False, freeze_px=1.0, freeze_min_obs=15,
                  freeze_min_views=3, acquire_sigma_mm=1.0, acquire_parallax_deg=60.0,
-                 acquire_min_obs=30):
+                 acquire_min_obs=30, semi_freeze=False, semi_freeze_strength=1.0):
         self.reference_id = reference_id
         # Statut "acquis" : un tag est SÛR (vert) — filtre de confiance, pas un verrou.
         self.acquire_sigma_mm = acquire_sigma_mm        # incertitude max (mm)
         self.acquire_parallax_deg = acquire_parallax_deg  # parallaxe min (deg)
         self.acquire_min_obs = acquire_min_obs          # observations min
+        # Semi-gel : rappel SOUPLE des tags acquis vers leur pose dans le BA (pas un
+        # verrou — le BA peut encore corriger). Stabilise sans graver d'erreur.
+        self.semi_freeze = semi_freeze
+        self.semi_freeze_strength = semi_freeze_strength  # px par mm de déviation
         self.min_observations = min_observations
         self.mapping = mapping           # True = on enrichit la carte ; False = figée
         self.tag_size = tag_size         # côté du tag (m), pour le PnP multi-tags
@@ -482,9 +486,9 @@ class WorldModel:
             z = np.where(np.abs(uvh[..., 2:3]) < 1e-6, 1e-6, uvh[..., 2:3])
             return uvh[..., :2] / z - obs_uv
 
-        from scipy.sparse import lil_matrix
+        from scipy.sparse import lil_matrix, vstack as spvstack
 
-        def sparsity(idx):
+        def reproj_sparsity(idx):
             S = lil_matrix((len(idx) * 8, nparam), dtype=int)
             for row, o in enumerate(idx):
                 rr = slice(row * 8, row * 8 + 8)
@@ -502,12 +506,36 @@ class WorldModel:
         active = np.ones(No, dtype=bool)
         sol = None
 
+        # SEMI-GEL : rappel souple des tags ACQUIS vers leur pose actuelle (x0),
+        # pondéré par la confiance. Lignes de résidu en plus = wpri*(t - t0). Le BA
+        # peut encore corriger (pas un verrou). σ est calculé hors de ce prior.
+        acq_i = ([i for i, t in enumerate(tag_list) if self.is_acquired(t)]
+                 if self.semi_freeze else [])
+        wpri = self.semi_freeze_strength * 1000.0          # px par mètre de déviation
+        t0_acq = (x[:ntag * 6].reshape(ntag, 6)[acq_i, 3:6].copy() if acq_i else None)
+
+        def prior(xx):
+            if not acq_i:
+                return np.zeros(0)
+            tp = xx[:ntag * 6].reshape(ntag, 6)[acq_i, 3:6]
+            return (wpri * (tp - t0_acq)).ravel()
+
+        Pspar = lil_matrix((3 * len(acq_i), nparam), dtype=int)
+        for k, i in enumerate(acq_i):
+            Pspar[k * 3:k * 3 + 3, i * 6 + 3:i * 6 + 6] = 1
+
+        def sparsity(idx):
+            if acq_i:
+                return spvstack([reproj_sparsity(idx), Pspar]).tocsr()
+            return reproj_sparsity(idx)
+
         for _ in range(max(1, outlier_iters)):
             idx = np.nonzero(active)[0]
             try:
-                sol = least_squares(lambda xx, ix=idx: reproj(xx)[ix].ravel(), x,
-                                    jac_sparsity=sparsity(idx), method="trf",
-                                    x_scale="jac", max_nfev=200)
+                sol = least_squares(
+                    lambda xx, ix=idx: np.concatenate([reproj(xx)[ix].ravel(), prior(xx)]),
+                    x, jac_sparsity=sparsity(idx), method="trf",
+                    x_scale="jac", max_nfev=200)
             except Exception:
                 break
             x = sol.x
@@ -528,23 +556,32 @@ class WorldModel:
         for ki in range(nkf):
             self.keyframes[ki]["cam"] = _params_to_pose(camP[ki])
 
-        self._estimate_uncertainty(sol, tag_list, ntag, nparam)
+        # Incertitude depuis les SEULES lignes de reprojection (on retire le prior).
+        if sol is not None:
+            try:
+                import scipy.sparse as sp
+                nrep = len(idx) * 8
+                Jd = sol.jac
+                Jd = Jd.tocsr()[:nrep] if sp.issparse(Jd) else np.asarray(Jd)[:nrep]
+                self._estimate_uncertainty(Jd, reproj(x)[idx].ravel(),
+                                           tag_list, ntag, nparam)
+            except Exception:
+                pass
         return (before, after, int((~active).sum()))
 
-    def _estimate_uncertainty(self, sol, tag_list, ntag, nparam):
+    def _estimate_uncertainty(self, J, resid_data, tag_list, ntag, nparam):
         """Incertitude de position par tag (sigma en mm) depuis la covariance du BA :
-        Cov = sigma0^2 * (JtJ)^-1, sigma0^2 = variance des résidus. On extrait le bloc
-        translation 3x3 de chaque tag -> rayon 1-sigma. C'est la mesure 'suis-je sûr ?'
-        en un seul scan (elle prédit la répétabilité)."""
-        if sol is None or nparam > 3000:        # au-delà, inversion trop lourde -> on saute
+        Cov = sigma0^2 * (JtJ)^-1, sigma0^2 = variance des résidus de REPROJECTION. On
+        extrait le bloc translation 3x3 de chaque tag -> rayon 1-sigma. C'est la mesure
+        'suis-je sûr ?' en un seul scan (elle prédit la répétabilité)."""
+        if J is None or nparam > 3000:          # au-delà, inversion trop lourde -> on saute
             return
         try:
             import scipy.sparse as sp
-            J = sol.jac
             JtJ = J.T @ J
             JtJ = JtJ.toarray() if sp.issparse(JtJ) else np.asarray(JtJ)
             dof = max(1, J.shape[0] - nparam)
-            sigma0_sq = 2.0 * float(sol.cost) / dof          # variance du bruit (px^2)
+            sigma0_sq = float(resid_data @ resid_data) / dof  # variance du bruit (px^2)
             cov = np.linalg.pinv(JtJ) * sigma0_sq            # bloc translation -> m^2
             for i, t in enumerate(tag_list):
                 b = i * 6 + 3
